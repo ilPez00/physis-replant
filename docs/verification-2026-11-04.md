@@ -149,6 +149,36 @@ match the operations the script performed. This is still a local fixture, not a
 live model; it proves the loop behavior and invalidation rules, not token or
 provider savings.
 
+## Real LLM token measurement (crystallization)
+
+`scripts/llm_cost_benchmark.py` compares two arms over the same repeated task:
+
+- **Baseline:** every iteration calls the LLM, then executes/verifies the plan.
+- **Replant:** first iteration calls the LLM once; later iterations replay.
+
+The LLM is the local `gemma4-e2b-heretic-Q4_K_M` gateway on omo (free), so the
+token counts below are real API usage, not estimates. The dollar column uses an
+**example** hosted price ($0.10/M input, $0.30/M output) and was not billed.
+
+Five iterations, both arms performed five real increments and passed five checks:
+
+| arm | LLM calls | prompt tokens | completion tokens | total tokens | wall time | example cost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| baseline | 5 | 375 | 1885 | 2260 | 18.37 s | $0.000603 |
+| replant | 1 | 75 | 377 | 452 | 4.50 s | $0.000121 |
+| saved | 4 | 300 | 1508 | **1808 (80.0%)** | 13.87 s | $0.000482 |
+
+For N identical iterations the call count is N versus 1, so the token reduction
+approaches `1 - 1/N` when each call uses the same prompt/recipe (N=5: 80%,
+N=10: 90%, N=100: 99%). A changed request/context/tool implementation forces a
+new LLM call, as the claim matrix above shows. This is the crystallization win:
+repeated tasks stop paying for inference, not merely for cached prompt bytes.
+
+Limits: the local model's completion tokens include its reasoning, so absolute
+counts would differ on another model; prompt caching could reduce the baseline's
+cached input price but does not eliminate its output tokens or calls. This is a
+synthetic one-step task, not a production agent workflow.
+
 ## Remaining boundaries
 
 - Docker access was denied; no live n8n installation, worker, workflow import or
