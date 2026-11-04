@@ -123,6 +123,32 @@ measurement. The n8n API key and bridge token are runtime credentials and are
 not stored in this repository. The imported workflow and the running n8n
 database still hold the bridge token; treat them as private local state.
 
+## Claim matrix through n8n
+
+`scripts/n8n_claims_test.py` drives three live n8n workflows: the loop
+(`run` → `record` on miss), run-only, and record-only. It asserts the claims
+against the real counter and the receipt journal, not against the bridge's
+self-report. Two runs (different timestamped contexts) produced:
+
+| claim | observed |
+| --- | --- |
+| one planner call, four replays, five actions | `record, replay, replay, replay, replay`; counter +5 |
+| recipe survives bridge restart | next call `replay`; counter +1 |
+| changed context | `miss`; counter unchanged |
+| changed input | `miss`; counter unchanged |
+| changed tool implementation | `miss`; counter unchanged |
+| restored tool implementation | `replay`; counter +1 |
+| failed check | `failed`; action had already incremented (no rollback) |
+| next call after failure | `blocked`; no action, still `blocked` after clearing the marker |
+| explicit re-record | `record` succeeded; next call `replay`; counter +1 each |
+| stats | measured records/replays/failures/blocked/pending, `pending: 0` |
+
+The first run's stats: 4 records, 11 replays, 2 failures, 2 blocked, 0 pending.
+The second run: 6 records, 18 replays, 3 failures, 4 blocked, 0 pending. Deltas
+match the operations the script performed. This is still a local fixture, not a
+live model; it proves the loop behavior and invalidation rules, not token or
+provider savings.
+
 ## Remaining boundaries
 
 - Docker access was denied; no live n8n installation, worker, workflow import or
