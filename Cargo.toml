@@ -1,0 +1,22 @@
+[package]
+name = "physis-replant"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-BSL-1.1"
+description = "Auditable cost crystallization: first run pays (model), later identical runs replay for free."
+repository = "https://github.com/ilPez00/physis-replant"
+keywords = ["ai", "cost", "crystallization", "memoization", "agent"]
+categories = ["development-tools", "caching"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "replant"
+path = "src/main.rs"
