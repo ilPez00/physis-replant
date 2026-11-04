@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Extracted from physis-next; standalone imports retained. See NOTICE.
 //! Escalation cascade: tries ordered engines, accepts the first whose best
 //! probability ≥ `accept` threshold, otherwise records the escalation path and
 //! (if confidence remains above `escalate_floor`) retains the best sub-threshold

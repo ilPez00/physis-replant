@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Extracted from physis-next; modified candidate validation. See NOTICE.
 //! Tier-0 deterministic engines (pure, no IO; world data arrives through the
 //! [`ExperienceOracle`] provider trait so this module never touches the
 //! observation log or any store directly).
@@ -206,6 +208,9 @@ impl DecisionEngine for CompiledRuleEngine {
     ) -> anyhow::Result<Option<Decision>> {
         let start = std::time::Instant::now();
         if let Some((pattern, candidate)) = self.match_state(state) {
+            if !options.iter().any(|option| option.id == candidate) {
+                return Ok(None);
+            }
             let probs: Vec<(String, f32)> = options
                 .iter()
                 .map(|o| {
@@ -337,6 +342,34 @@ impl DecisionEngine for AbstainEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compiled_rule_cannot_select_an_unoffered_action() {
+        let state = State {
+            description: "do not restart k3s".into(),
+            refs: vec![],
+            metrics: Default::default(),
+        };
+        let rule = CompiledRule {
+            rule: Rule {
+                pattern: "k3s".into(),
+                candidate_id: "restart k3s".into(),
+                confidence: 1.0,
+            },
+            sources: vec![],
+            created_at: "0".into(),
+            validated: true,
+            replays: 2,
+            successes: 2,
+            saved_ms: 0,
+        };
+        let engine = CompiledRuleEngine::new(vec![rule], 0.8, 2);
+        let options = vec![OptionCandidate {
+            id: "inspect logs".into(),
+            semantic_description: "read only".into(),
+            tags: vec![],
+        }];
+        assert!(engine.choose(&state, &options).unwrap().is_none());
+    }
     use std::collections::BTreeMap;
 
     #[test]

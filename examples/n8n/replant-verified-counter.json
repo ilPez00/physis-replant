@@ -1,0 +1,207 @@
+{
+  "name": "replant verified counter (HTTP bridge template)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "replant-demo",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "97c79cd8-bce1-4bc0-91a4-faf47a9019b2",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "<BRIDGE_URL>/run",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer <REPLANT_TOKEN>"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"prompt\": \"increment once\", \"input\": {\"amount\": 1}, \"context\": {\"workflow\": \"n8n-counter-v2\", \"tenant\": \"demo\"}}",
+        "options": {}
+      },
+      "id": "af65cad6-800d-4952-b69c-703c506bbf83",
+      "name": "Replant Run",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "b6bcfc32-bb2e-441c-9811-8d273edd872b",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "succeeded",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "succeeded"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "20369660-7964-44e3-b134-b3edf4a03dbe",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "miss",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "miss"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "725dcf3e-57f0-47b7-be4d-6bb07e2343a2",
+      "name": "Route Status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "77c1ad19-148f-4999-999d-952cac8b4086",
+      "name": "Done",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        660,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "<BRIDGE_URL>/record",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer <REPLANT_TOKEN>"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"request\": {\"prompt\": \"increment once\", \"input\": {\"amount\": 1}, \"context\": {\"workflow\": \"n8n-counter-v2\", \"tenant\": \"demo\"}}, \"recipe\": {\"steps\": [{\"tool\": \"increment\", \"input\": {\"amount\": 1}}], \"checks\": [{\"tool\": \"verify\", \"input\": {}}]}, \"trace\": {\"provider\": \"n8n-literal-placeholder-not-llm\"}}",
+        "options": {}
+      },
+      "id": "86295721-5277-4f54-ad84-f98c0c503a04",
+      "name": "Replant Record",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        80
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "8519c2bf-879b-4bf5-b950-4d925bd0276b",
+      "name": "Stop: failed or blocked",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        660,
+        280
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Replant Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Replant Run": {
+      "main": [
+        [
+          {
+            "node": "Route Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Status": {
+      "main": [
+        [
+          {
+            "node": "Done",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Replant Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

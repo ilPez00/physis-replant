@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+// Extracted from physis-next; modified validation and benchmark labeling. See NOTICE.
 //! Soar-like compiled cognition: expensive trace → reusable rule.
 //!
 //! Steals chunking (EBT backtrace → build) + NARS revision truth +
-//! LangGraph checkpoint/replay. Never auto-promotes: compiled rules sit in
-//! [`Quarantine`] with `validated=false` until an explicit human `validate()`
-//! call, then replay-measured before they earn traffic.
+//! LangGraph checkpoint/replay. Legacy selection-rule primitives, not the
+//! verified workflow replay path. Their caller-provided replay scores are not
+//! evidence of executed actions; use `Memo` and its tool receipts for that.
 //!
 //! Provenance: every [`CompiledRule`] names the source trace digests it was
 //! built from, so the HUD can jump from rule → traces.
@@ -42,7 +44,11 @@ impl CompiledRule {
 /// selection the candidate id. Richer subgraph extraction is future work —
 /// this ships the lifecycle (quarantine → validate → replay → measure).
 pub fn compile_trace(trace: &DecisionTrace, min_confidence: f32) -> Option<CompiledRule> {
-    if trace.escalated {
+    if trace.escalated
+        || trace.decision.validate().is_err()
+        || !min_confidence.is_finite()
+        || !(0.0..=1.0).contains(&min_confidence)
+    {
         return None;
     }
     let selected = trace.decision.selected.clone()?;
@@ -253,7 +259,7 @@ mod tests {
         let k: usize = 10;
         let min_replays: u64 = 2;
         let min_rate: f64 = 0.8;
-        let model_latency_ms: u128 = 120;
+        let model_latency_ms: u128 = 120; // Accounting fixture, not measured latency.
 
         let selected = "restart k3s".to_string();
         let trace = DecisionTrace {
@@ -291,7 +297,6 @@ mod tests {
             if !promoted.is_empty() {
                 tiers.push("T0a");
                 free_count += 1;
-                total_ms_with += 0;
                 total_ms_without += model_latency_ms;
                 if promoted[0].rule.candidate_id == original {
                     correctness += 1;
@@ -315,16 +320,22 @@ mod tests {
             f64::INFINITY
         };
 
-        println!("=== crystallize effectiveness: n8n loop ({} iters) ===", k);
+        println!(
+            "=== synthetic tier accounting only ({} iters); NOT an n8n performance benchmark ===",
+            k
+        );
         println!("tiers:            {:?}", tiers);
         println!("model (T2) runs:  {}", model_count);
         println!("free (T0a) runs:  {}", free_count);
-        println!("effectiveness:    {:.1}%", effectiveness);
+        println!("assumed free share: {:.1}%", effectiveness);
         println!("promotion at iter: {:?}", promotion_at);
-        println!("correctness:      {}/{}", correctness, free_count);
-        println!("total ms with crystallize:    {}", total_ms_with);
-        println!("total ms without (all T2):    {}", total_ms_without);
-        println!("speedup:          {:.2}x", speedup);
+        println!(
+            "stored selection equality (not outcome correctness): {}/{}",
+            correctness, free_count
+        );
+        println!("assumed ms with crystallize:    {}", total_ms_with);
+        println!("assumed ms without (all T2):    {}", total_ms_without);
+        println!("arithmetic ratio (not measured speedup): {:.2}x", speedup);
 
         assert!(promotion_at.is_some(), "rule must promote");
         assert!(free_count > 0, "must have free runs");
@@ -334,7 +345,16 @@ mod tests {
             "at least {} free runs after warmup",
             k - min_replays as usize
         );
-        assert!(speedup > 1.0, "crystallize must be faster");
+        assert!(speedup > 1.0, "accounting must reflect the assumed costs");
     }
 
+    #[test]
+    fn invalid_confidences_and_thresholds_never_compile() {
+        for confidence in [f32::NAN, f32::INFINITY, -1.0, 2.0] {
+            let mut trace = good_trace();
+            trace.decision.confidence = confidence;
+            assert!(compile_trace(&trace, 0.9).is_none());
+        }
+        assert!(compile_trace(&good_trace(), f32::NAN).is_none());
+    }
 }

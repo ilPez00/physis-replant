@@ -8,13 +8,14 @@ License text copyright (c) 2017 MariaDB Corporation Ab, All Rights Reserved.
 Parameters
 
 Licensor:             ilPez00
-Licensed Work:        physis-replant 0.1.0
+Licensed Work:        physis-replant 0.2.0, excluding the Apache-2.0 portions
+                      identified in NOTICE
                       The Licensed Work is (c) 2026 ilPez00
-Additional Use Grant: You may use the Licensed Work for any non-production
-                      purpose and for production use by individuals and
-                      non-commercial entities. Production use by commercial
-                      entities requires a separate commercial license from
-                      the Licensor.
+Additional Use Grant: You may make production use for personal, non-commercial
+                      purposes and on behalf of non-profit organizations.
+                      Production use for a business, including internal
+                      business operations and use by contractors on its behalf,
+                      requires a separate commercial license from the Licensor.
 Change Date:          2030-11-04
 Change License:       Apache License, Version 2.0
 
@@ -45,8 +46,8 @@ vary for each version of the Licensed Work released by Licensor.
 
 You must conspicuously display this License on each original or modified copy
 of the Licensed Work. If you receive the Licensed Work in original or
-modified form from a third party, the terms and conditions of this License
-apply to your use of that work.
+modified form from a third party, the terms and conditions set forth in this
+License apply to your use of that work.
 
 Any use of the Licensed Work in violation of this License will automatically
 terminate your rights under this License for the current and all other
@@ -80,11 +81,9 @@ all other recipients of the licensed work to be provided by Licensor:
    limitation.
 
 2. To either: (a) specify an additional grant of rights to use that does not
-   restrict the right of a recipient to use the Licensed Work in production,
-   in accordance with the Additional Use Grant; (b) for a period of up to
-   four years, specify an Additional Use Grant that restricts the right of
-   a recipient to use the Licensed Work in production, and (c) provide a
-   Change Date at least four years after the date of first distribution of
-   this version of the Licensed Work.
+   impose any additional restriction on the right granted in this License, as
+   the Additional Use Grant; or (b) insert the text "None".
 
-3. Not to modify this License in any other way.
+3. To specify a Change Date.
+
+4. Not to modify this License in any other way.

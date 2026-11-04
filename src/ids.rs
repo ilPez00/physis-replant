@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Extracted from physis-next; standalone subset. See NOTICE.
 //! Stable string ids. Entities are never identified by embeddings.
 
 use sha2::{Digest, Sha256};

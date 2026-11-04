@@ -1,8 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Extracted from physis-next; standalone subset and imports. See NOTICE.
 //! Trace helpers for replant.
 
-
-use crate::State;
 use crate::ids::stable_id;
+use crate::State;
 
 /// Deterministic digest of a [`State`].
 pub fn state_digest(state: &State) -> String {
