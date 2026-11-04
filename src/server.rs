@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Value};
 
-use crate::workflow::{Memo, RecordInput, Request, Status};
+use crate::workflow::{Memo, RecordInput, Request, ReviewInput, Status};
 
 const MAX_HEADER: usize = 16_384;
 const MAX_BODY: usize = 1 << 20;
@@ -140,14 +140,25 @@ fn dispatch(memo: &Mutex<Memo>, token: &str, request: HttpRequest) -> (u16, Valu
             (405, json!({"status":"failed","reason":"use GET /healthz"}))
         };
     }
-    if !matches!(request.path.as_str(), "/run" | "/record") {
+    if !matches!(
+        request.path.as_str(),
+        "/run" | "/record" | "/approve" | "/reject" | "/undo" | "/stats"
+    ) {
         return (404, json!({"status":"failed","reason":"unknown path"}));
     }
     if !authorized(token, request.authorization.as_deref()) {
         return (401, json!({"status":"failed","reason":"unauthorized"}));
     }
-    if request.method != "POST" {
-        return (405, json!({"status":"failed","reason":"use POST"}));
+    let expected_method = if request.path == "/stats" {
+        "GET"
+    } else {
+        "POST"
+    };
+    if request.method != expected_method {
+        return (
+            405,
+            json!({"status":"failed","reason":format!("use {expected_method}")}),
+        );
     }
     let mut memo = match memo.lock() {
         Ok(memo) => memo,
@@ -158,19 +169,45 @@ fn dispatch(memo: &Mutex<Memo>, token: &str, request: HttpRequest) -> (u16, Valu
             )
         }
     };
-    let receipt = if request.path == "/run" {
-        serde_json::from_slice::<Request>(&request.body)
+    if request.path == "/stats" {
+        return match memo.stats() {
+            Ok(stats) => (
+                200,
+                serde_json::to_value(stats).unwrap_or_else(|_| json!({"status":"failed"})),
+            ),
+            Err(error) => (
+                500,
+                json!({"status":"failed","reason":format!("{error:#}")}),
+            ),
+        };
+    }
+    let receipt = match request.path.as_str() {
+        "/run" => serde_json::from_slice::<Request>(&request.body)
             .map_err(anyhow::Error::from)
-            .and_then(|request| memo.run(&request))
-    } else {
-        serde_json::from_slice::<RecordInput>(&request.body)
+            .and_then(|request| memo.run(&request)),
+        "/record" => serde_json::from_slice::<RecordInput>(&request.body)
             .map_err(anyhow::Error::from)
-            .and_then(|record| memo.record(&record))
+            .and_then(|record| memo.record(&record)),
+        "/approve" => serde_json::from_slice::<ReviewInput>(&request.body)
+            .map_err(anyhow::Error::from)
+            .and_then(|review| memo.approve(&review)),
+        "/reject" => serde_json::from_slice::<ReviewInput>(&request.body)
+            .map_err(anyhow::Error::from)
+            .and_then(|review| memo.reject(&review)),
+        _ => serde_json::from_slice::<serde_json::Value>(&request.body)
+            .map_err(anyhow::Error::from)
+            .and_then(|value| {
+                value
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("missing id"))
+                    .and_then(|id| memo.undo(id))
+            }),
     };
     match receipt {
         Ok(receipt) => {
             let status = match receipt.status {
-                Status::Succeeded | Status::Miss => 200,
+                Status::Succeeded | Status::Miss | Status::Review | Status::Rejected => 200,
                 Status::Blocked => 409,
                 _ => 422,
             };

@@ -1,6 +1,6 @@
-//! Verified recipes and versioned decisions. Model traces are metadata, not proof.
+//! Verified recipes, near-match review, compensation, and versioned decisions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -13,6 +13,9 @@ use crate::{runner, store::Store};
 
 pub const STRATEGY: &str = "exact-request-verified-tools-v1";
 pub const MAX_JSON_BYTES: usize = 1 << 20;
+/// Near-match proposals are opt-in: never auto-replayed, always reviewed.
+pub const REVIEW_THRESHOLD: f64 = 0.80;
+pub const MAX_REVIEW_CANDIDATES: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +32,7 @@ pub struct Request {
 pub enum ToolKind {
     Action,
     Check,
+    Undo,
 }
 
 fn default_timeout() -> u64 {
@@ -60,12 +64,24 @@ pub struct ToolCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct Recipe {
-    #[serde(default)]
     pub preconditions: Vec<ToolCall>,
     pub steps: Vec<ToolCall>,
     pub checks: Vec<ToolCall>,
+    /// Declared inverse of `steps`; run on failure or by explicit `undo`.
+    pub undo: Vec<ToolCall>,
+}
+
+impl Default for Recipe {
+    fn default() -> Self {
+        Self {
+            preconditions: Vec::new(),
+            steps: Vec::new(),
+            checks: Vec::new(),
+            undo: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,12 +92,22 @@ pub struct RecordInput {
     pub trace: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewInput {
+    pub request: Request,
+    pub candidate: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     Record,
     Replay,
     Lookup,
+    Approve,
+    Reject,
+    Undo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +118,8 @@ pub enum Status {
     Failed,
     Miss,
     Blocked,
+    Review,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +132,13 @@ pub struct ToolOutcome {
     pub output: Option<Value>,
     pub error: Option<String>,
     pub elapsed_us: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewCandidate {
+    pub id: String,
+    pub similarity: f64,
+    pub request: Request,
 }
 
 /// One append-only memorizer decision; Started and terminal rows share an id.
@@ -120,6 +155,8 @@ pub struct Receipt {
     pub provider_calls: u64,
     pub elapsed_us: u128,
     pub calls: Vec<ToolOutcome>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<ReviewCandidate>,
     pub reason: Option<String>,
 }
 
@@ -136,6 +173,12 @@ pub struct LearnedRecord {
     pub strategy: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Rejection {
+    pub key: String,
+    pub candidate: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Stats {
     pub executions: u64,
@@ -143,6 +186,10 @@ pub struct Stats {
     pub verified_replays: u64,
     pub failures: u64,
     pub misses: u64,
+    pub reviews: u64,
+    pub rejected: u64,
+    pub undos: u64,
+    pub undo_failures: u64,
     pub blocked: u64,
     pub pending: u64,
     pub replay_share_percent: f64,
@@ -170,6 +217,27 @@ fn request_key(request: &Request) -> Result<String> {
     digest(&(STRATEGY, request))
 }
 
+fn tokens(request: &Request) -> BTreeSet<String> {
+    let mut text = request.prompt.to_lowercase();
+    text.push(' ');
+    text.push_str(&request.input.to_string());
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Token Jaccard over prompt+input. Context equality is required separately.
+pub fn similarity(a: &Request, b: &Request) -> f64 {
+    let (a, b) = (tokens(a), tokens(b));
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    let intersection = a.intersection(&b).count() as f64;
+    let union = a.union(&b).count() as f64;
+    intersection / union
+}
+
 impl Memo {
     pub fn open(path: impl AsRef<Path>, tools: ToolRegistry) -> Result<Self> {
         runner::validate_registry(&tools)?;
@@ -184,13 +252,13 @@ impl Memo {
         let _lock = self.store.lock()?;
         let history = self.store.history()?;
         let policy = runner::fingerprint(&self.tools)?;
-        let last_execution = history
-            .iter()
-            .rev()
-            .find(|r| r.key == key && r.operation != Operation::Lookup);
+        let last_execution = history.iter().rev().find(|r| {
+            r.key == key && r.operation != Operation::Lookup && r.operation != Operation::Reject
+        });
         let entry = self.store.entry(&key)?;
         if last_execution.is_some_and(|r| r.status != Status::Succeeded)
             || (last_execution.is_some() && entry.is_none())
+            || last_execution.is_some_and(|r| r.operation == Operation::Undo)
         {
             let receipt = self.receipt(
                 &key,
@@ -200,7 +268,7 @@ impl Memo {
                 None,
                 history.len(),
             )?;
-            let receipt = Receipt { reason: Some("prior execution failed, was interrupted, or lacks its index; inspect effects before recording again".into()), ..receipt };
+            let receipt = Receipt { reason: Some("prior execution failed, was interrupted, was undone, or lacks its index; inspect effects before recording again".into()), ..receipt };
             self.store.append(&receipt)?;
             return Ok(receipt);
         }
@@ -214,8 +282,9 @@ impl Memo {
                 "stored recipe hash mismatch"
             );
             ensure!(entry.schema == 1, "unsupported record schema");
-            if last_execution.is_some_and(|r| r.operation == Operation::Record && r.id != entry.id)
-            {
+            if last_execution.is_some_and(|r| {
+                matches!(r.operation, Operation::Record | Operation::Approve) && r.id != entry.id
+            }) {
                 bail!(
                     "latest verified record was not indexed; inspect state before recording again"
                 );
@@ -228,7 +297,7 @@ impl Memo {
             } else if !history.iter().any(|r| {
                 r.id == entry.id
                     && r.key == key
-                    && r.operation == Operation::Record
+                    && matches!(r.operation, Operation::Record | Operation::Approve)
                     && r.status == Status::Succeeded
                     && r.recipe_hash.as_deref() == Some(entry.recipe_hash.as_str())
                     && r.policy_hash == entry.policy_hash
@@ -241,16 +310,24 @@ impl Memo {
             Some("no verified recipe for this exact request")
         };
         if let Some(reason) = reason {
-            let receipt = self.receipt(
-                &key,
-                Operation::Lookup,
-                Status::Miss,
-                policy,
-                None,
-                history.len(),
-            )?;
+            let candidates = if entry.is_none() {
+                self.review_candidates(request, &key)?
+            } else {
+                Vec::new()
+            };
+            let (status, reason) = if candidates.is_empty() {
+                (Status::Miss, reason)
+            } else {
+                (
+                    Status::Review,
+                    "near-match recipes require explicit approval",
+                )
+            };
+            let receipt =
+                self.receipt(&key, Operation::Lookup, status, policy, None, history.len())?;
             let receipt = Receipt {
                 reason: Some(reason.into()),
+                candidates,
                 ..receipt
             };
             self.store.append(&receipt)?;
@@ -315,6 +392,140 @@ impl Memo {
         Ok(receipt)
     }
 
+    /// Approve a near-match candidate: execute its recipe under this exact request.
+    pub fn approve(&mut self, input: &ReviewInput) -> Result<Receipt> {
+        let key = request_key(&input.request)?;
+        let _lock = self.store.lock()?;
+        let history = self.store.history()?;
+        let policy = runner::fingerprint(&self.tools)?;
+        if self.store.entry(&key)?.is_some() {
+            bail!("an exact verified recipe already exists; use run");
+        }
+        if history.iter().rev().any(|r| {
+            r.key == key
+                && r.operation != Operation::Lookup
+                && r.operation != Operation::Reject
+                && r.status != Status::Succeeded
+        }) {
+            bail!("prior failed execution for this request; inspect effects before approving");
+        }
+        let candidate = self
+            .store
+            .record(&input.candidate)?
+            .context("unknown candidate record")?;
+        ensure!(
+            candidate.request.context == input.request.context,
+            "candidate context does not match; refusing cross-context approval"
+        );
+        let score = similarity(&input.request, &candidate.request);
+        ensure!(
+            score >= REVIEW_THRESHOLD,
+            "candidate similarity {score:.3} is below {REVIEW_THRESHOLD:.2}"
+        );
+        self.validate_recipe(&candidate.recipe)?;
+        let recipe_hash = digest(&candidate.recipe)?;
+        let receipt = self.receipt(
+            &key,
+            Operation::Approve,
+            Status::Started,
+            policy.clone(),
+            Some(recipe_hash.clone()),
+            history.len(),
+        )?;
+        let learned = LearnedRecord {
+            schema: 1,
+            id: receipt.id.clone(),
+            request: input.request.clone(),
+            recipe: candidate.recipe.clone(),
+            trace: candidate.trace.clone(),
+            policy_hash: policy,
+            recipe_hash,
+            engine_version: env!("CARGO_PKG_VERSION").into(),
+            strategy: STRATEGY.into(),
+        };
+        self.store.save_record(&learned)?;
+        let receipt = self.execute(receipt, &learned.recipe)?;
+        if receipt.status == Status::Succeeded {
+            self.store.index(&key, &learned.id)?;
+        }
+        Ok(receipt)
+    }
+
+    pub fn reject(&mut self, input: &ReviewInput) -> Result<Receipt> {
+        let key = request_key(&input.request)?;
+        let _lock = self.store.lock()?;
+        let history = self.store.history()?;
+        let policy = runner::fingerprint(&self.tools)?;
+        self.store
+            .record(&input.candidate)?
+            .context("unknown candidate record")?;
+        self.store.append_rejection(&Rejection {
+            key: key.clone(),
+            candidate: input.candidate.clone(),
+        })?;
+        let receipt = self.receipt(
+            &key,
+            Operation::Reject,
+            Status::Rejected,
+            policy,
+            None,
+            history.len(),
+        )?;
+        self.store.append(&receipt)?;
+        Ok(receipt)
+    }
+
+    /// Explicitly run a record's declared undo steps in reverse order.
+    pub fn undo(&mut self, id: &str) -> Result<Receipt> {
+        let _lock = self.store.lock()?;
+        let record = self.store.record(id)?.context("unknown record")?;
+        ensure!(
+            !record.recipe.undo.is_empty(),
+            "recipe declares no undo steps"
+        );
+        self.validate_undo(&record.recipe)?;
+        let key = request_key(&record.request)?;
+        let history = self.store.history()?;
+        let policy = runner::fingerprint(&self.tools)?;
+        let receipt = self.receipt(
+            &key,
+            Operation::Undo,
+            Status::Started,
+            policy,
+            Some(record.recipe_hash),
+            history.len(),
+        )?;
+        self.store.append(&receipt)?;
+        let start = Instant::now();
+        let mut receipt = receipt;
+        for call in record.recipe.undo.iter().rev() {
+            if let Err(error) = self.verify_policy(&receipt.policy_hash) {
+                receipt.reason = Some(format!("{error:#}"));
+                break;
+            }
+            let outcome = runner::execute(&call.tool, &self.tools[&call.tool], &call.input, "undo");
+            let ok = outcome.ok;
+            if !ok {
+                receipt.reason = outcome
+                    .error
+                    .clone()
+                    .map(|e| format!("undo step failed: {e}"));
+            }
+            receipt.calls.push(outcome);
+            if !ok {
+                break;
+            }
+        }
+        receipt.elapsed_us = start.elapsed().as_micros();
+        receipt.status = if receipt.reason.is_some() {
+            Status::Failed
+        } else {
+            Status::Succeeded
+        };
+        self.store.append(&receipt)?;
+        Ok(receipt)
+    }
+
     pub fn inspect(&self, request: &Request) -> Result<Option<LearnedRecord>> {
         let key = request_key(request)?;
         let _lock = self.store.lock()?;
@@ -341,12 +552,22 @@ impl Memo {
                 }
                 (Operation::Lookup, Status::Miss) => stats.misses += 1,
                 (Operation::Lookup, Status::Blocked) => stats.blocked += 1,
-                (Operation::Record, Status::Succeeded) => {
+                (Operation::Lookup, Status::Review) => stats.reviews += 1,
+                (Operation::Reject, Status::Rejected) => stats.rejected += 1,
+                (Operation::Record | Operation::Approve, Status::Succeeded) => {
                     stats.verified_records += 1;
                     stats.executions += 1;
                 }
                 (Operation::Replay, Status::Succeeded) => {
                     stats.verified_replays += 1;
+                    stats.executions += 1;
+                }
+                (Operation::Undo, Status::Succeeded) => {
+                    stats.undos += 1;
+                    stats.executions += 1;
+                }
+                (Operation::Undo, Status::Failed) => {
+                    stats.undo_failures += 1;
                     stats.executions += 1;
                 }
                 (_, Status::Failed | Status::Blocked) => {
@@ -363,19 +584,60 @@ impl Memo {
         Ok(stats)
     }
 
+    fn review_candidates(&self, request: &Request, key: &str) -> Result<Vec<ReviewCandidate>> {
+        let rejected: BTreeSet<String> = self
+            .store
+            .rejections()?
+            .into_iter()
+            .filter(|r| r.key == key)
+            .map(|r| r.candidate)
+            .collect();
+        let mut candidates = Vec::new();
+        for record in self.store.records()? {
+            if record.request.context != request.context
+                || record.engine_version != env!("CARGO_PKG_VERSION")
+                || record.strategy != STRATEGY
+                || rejected.contains(&record.id)
+            {
+                continue;
+            }
+            let score = similarity(request, &record.request);
+            if score >= REVIEW_THRESHOLD {
+                candidates.push(ReviewCandidate {
+                    id: record.id,
+                    similarity: score,
+                    request: record.request,
+                });
+            }
+        }
+        candidates.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        candidates.truncate(MAX_REVIEW_CANDIDATES);
+        Ok(candidates)
+    }
+
     fn validate_recipe(&self, recipe: &Recipe) -> Result<()> {
         ensure!(
             !recipe.steps.is_empty() && !recipe.checks.is_empty(),
             "recipe requires actions and independent checks"
         );
         ensure!(
-            recipe.steps.len() + recipe.checks.len() + recipe.preconditions.len() <= 32,
+            recipe.steps.len()
+                + recipe.checks.len()
+                + recipe.preconditions.len()
+                + recipe.undo.len()
+                <= 32,
             "recipe exceeds 32 calls"
         );
         for (calls, kind) in [
             (&recipe.steps, ToolKind::Action),
             (&recipe.checks, ToolKind::Check),
             (&recipe.preconditions, ToolKind::Check),
+            (&recipe.undo, ToolKind::Undo),
         ] {
             for call in calls {
                 let spec = self
@@ -392,6 +654,25 @@ impl Memo {
                     "tool input exceeds 64 KiB"
                 );
             }
+        }
+        Ok(())
+    }
+
+    fn validate_undo(&self, recipe: &Recipe) -> Result<()> {
+        for call in &recipe.undo {
+            let spec = self
+                .tools
+                .get(&call.tool)
+                .with_context(|| format!("unknown undo tool: {}", call.tool))?;
+            ensure!(
+                spec.kind == ToolKind::Undo,
+                "tool {} is not registered as Undo",
+                call.tool
+            );
+            ensure!(
+                serde_json::to_vec(&call.input)?.len() <= runner::MAX_TOOL_BYTES,
+                "undo input exceeds 64 KiB"
+            );
         }
         Ok(())
     }
@@ -418,6 +699,7 @@ impl Memo {
             provider_calls: 0,
             elapsed_us: 0,
             calls: Vec::new(),
+            candidates: Vec::new(),
             reason: None,
         })
     }
@@ -426,6 +708,7 @@ impl Memo {
         // Persist intent before effects: an interrupted invocation cannot look clean.
         self.store.append(&receipt)?;
         let start = Instant::now();
+        let mut actions_ran = false;
         'phases: for (phase, calls) in [
             ("precondition", &recipe.preconditions),
             ("action", &recipe.steps),
@@ -439,12 +722,40 @@ impl Memo {
                 let outcome =
                     runner::execute(&call.tool, &self.tools[&call.tool], &call.input, phase);
                 let ok = outcome.ok;
+                if phase == "action" {
+                    actions_ran = true;
+                }
                 if !ok {
                     receipt.reason = outcome.error.clone();
                 }
                 receipt.calls.push(outcome);
                 if !ok {
                     break 'phases;
+                }
+            }
+        }
+        if receipt.reason.is_some() && actions_ran && !recipe.undo.is_empty() {
+            for call in recipe.undo.iter().rev() {
+                if let Err(error) = self.verify_policy(&receipt.policy_hash) {
+                    receipt.reason = Some(format!(
+                        "{}; compensation failed: {error:#}",
+                        receipt.reason.unwrap_or_default()
+                    ));
+                    break;
+                }
+                let outcome =
+                    runner::execute(&call.tool, &self.tools[&call.tool], &call.input, "undo");
+                let ok = outcome.ok;
+                if !ok {
+                    let error = outcome.error.clone().unwrap_or_default();
+                    receipt.reason = Some(format!(
+                        "{}; compensation failed: {error}",
+                        receipt.reason.unwrap_or_default()
+                    ));
+                }
+                receipt.calls.push(outcome);
+                if !ok {
+                    break;
                 }
             }
         }

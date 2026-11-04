@@ -1,0 +1,22 @@
+{
+  "name": "@physis-replant/sdk",
+  "version": "0.3.0",
+  "description": "TypeScript-ready client for the physis-replant HTTP bridge",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./replant.mjs",
+  "types": "./replant.d.ts",
+  "exports": {
+    ".": {
+      "import": "./replant.mjs",
+      "types": "./replant.d.ts"
+    }
+  },
+  "scripts": {
+    "test": "node --test test.mjs"
+  },
+  "files": [
+    "replant.mjs",
+    "replant.d.ts"
+  ]
+}

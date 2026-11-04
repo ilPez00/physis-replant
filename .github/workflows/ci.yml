@@ -8,7 +8,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: cargo fmt --all -- --check
       - run: cargo test --locked
       - run: cargo build --locked --release
       - run: python3 scripts/benchmark.py --binary target/release/replant
+      - name: Python SDK and adapters
+        working-directory: sdk/python
+        run: python3 -m unittest -v test_client.py test_adapters.py
+      - name: TypeScript SDK
+        working-directory: sdk/typescript
+        run: node --test test.mjs
+      - name: n8n community node
+        working-directory: n8n-nodes-replant
+        run: node --test test/node.test.js

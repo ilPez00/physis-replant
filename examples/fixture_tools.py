@@ -7,7 +7,7 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("increment", "verify"))
+    parser.add_argument("mode", choices=("increment", "verify", "decrement"))
     parser.add_argument("root", type=pathlib.Path)
     args = parser.parse_args()
     value = json.load(sys.stdin)
@@ -20,6 +20,12 @@ def main():
         previous.write_text(str(before))
         counter.write_text(str(before + 1))
         result = {"ok": True, "count": before + 1}
+    elif args.mode == "decrement":
+        if value != {}:
+            raise ValueError("undo input must be an empty object")
+        count = int(counter.read_text()) if counter.exists() else 0
+        counter.write_text(str(max(0, count - 1)))
+        result = {"ok": True, "count": max(0, count - 1)}
     else:
         if value != {}:
             raise ValueError("check input must be an empty object")

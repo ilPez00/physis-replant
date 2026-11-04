@@ -1,5 +1,9 @@
 # n8n integration (self-hosted, local)
 
+> Prefer the community node in [`n8n-nodes-replant/`](../../n8n-nodes-replant/).
+> The HTTP workflow below remains a zero-install fallback and was the path used
+> in the live record→replay test.
+
 Architecture: n8n runs in a **Docker container**; `replant` runs on the **host**.
 The container's HTTP client cannot reach any host interface in this deployment
 (`172.17.0.1`, the LAN IP and the Tailscale IP all hang), so the tested path uses

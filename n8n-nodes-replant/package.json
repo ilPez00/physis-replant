@@ -1,0 +1,25 @@
+{
+  "name": "n8n-nodes-replant",
+  "version": "0.1.0",
+  "description": "n8n nodes for physis-replant verified replay",
+  "license": "Apache-2.0",
+  "main": "index.js",
+  "keywords": [
+    "n8n-community-node-package",
+    "replant",
+    "verified-replay",
+    "llm-cost"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "nodes": [
+      "nodes/Replant/Replant.node.js"
+    ],
+    "credentials": [
+      "credentials/ReplantApi.credentials.js"
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/node.test.js"
+  }
+}

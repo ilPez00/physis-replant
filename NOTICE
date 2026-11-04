@@ -1,6 +1,12 @@
 physis-replant
 
-The following material was extracted from physis-next (Apache License 2.0):
+Copyright 2026 ilPez00
+
+The entire project is licensed under the Apache License, Version 2.0 (see
+LICENSE). This includes material extracted from physis-next, whose original
+Apache-2.0 license and notices are preserved here.
+
+Extracted from physis-next (Apache-2.0):
   src/cascade.rs
   src/compile.rs
   src/deterministic.rs
@@ -10,12 +16,9 @@ The following material was extracted from physis-next (Apache License 2.0):
 
 Upstream: https://github.com/ilPez00/physis-next
 Original extraction: physis-replant commit e0c3cf8.
-These portions remain available under Apache-2.0; see LICENSE-APACHE.
 Modified in this project: imports, standalone trace helpers, input validation,
-candidate guards and accurate labeling of synthetic accounting tests.
-No pre-existing Apache rights are revoked by the Business Source License.
+candidate guards, undo/review wiring, and accurate labeling of synthetic tests.
 
-New workflow replay implementation (src/workflow.rs, src/store.rs,
-src/runner.rs, src/main.rs), integration tests and examples are governed by
-LICENSE unless a file explicitly states otherwise. This distribution is
-source-available, not an OSI-approved open-source release.
+The replay engine, CLI, HTTP bridge, MCP server, SDKs, and n8n node are original
+work licensed Apache-2.0. No separate commercial license is required to use,
+modify, or redistribute this repository.

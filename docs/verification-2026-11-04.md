@@ -192,6 +192,32 @@ cached input price but does not eliminate its output tokens or calls. The
 OpenRouter model is free, so the dollar column is a separate example price, not
 billing. This is a synthetic one-step task, not a production agent workflow.
 
+## v0.3.0 open-core features
+
+Relicensed the core to Apache-2.0 (v0.1/v0.2 remain BSL-1.1) and added:
+
+- **MCP stdio server** (`replant mcp`): initialize, tools/list, 7 tool calls,
+  structured errors, notification handling. Covered by 3 unit tests and a
+  spawn-the-binary stdio test.
+- **Near-match review**: token-Jaccard similarity >= 0.80 within an exact
+  context, max 3 candidates. `approve` re-executes and verifies; `reject`
+  suppresses the candidate. Tests cover review, approve, replay afterward, and
+  rejection.
+- **Compensation and undo**: `undo` tool kind, reverse compensation after a
+  failed check, explicit `undo <record-id>`, and replay blocking after undo.
+  Tests cover counter restoration and blocked replay.
+- **SDKs**: Python stdlib client (3 tests), TypeScript-ready ESM + `.d.ts`
+  (3 tests), LangChain/CrewAI/AutoGen shims (3 tests, framework-absent paths).
+- **n8n community node**: run/record/inspect/stats/approve/reject/undo, credential
+  health check, 5 tests with a mocked HTTP helper.
+- **HTTP bridge**: `/approve`, `/reject`, `/undo`, `/stats`.
+
+Gate: 54 Rust tests, 5 node tests, 3 TypeScript tests, 6 Python tests; `cargo fmt`
+clean; CI workflow extended with the Node/Python jobs. Not tested: a live MCP
+client, framework runtimes, npm-installed n8n node, or the v0.3 binary against
+the running n8n instance (the live bridge remains v0.2 until restarted; its
+engine-version change will invalidate old recipes, so re-record after upgrade).
+
 ## Remaining boundaries
 
 - Docker access was denied; no live n8n installation, worker, workflow import or

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 
-use crate::workflow::{LearnedRecord, Operation, Receipt, Status, MAX_JSON_BYTES};
+use crate::workflow::{LearnedRecord, Operation, Receipt, Rejection, Status, MAX_JSON_BYTES};
 
 const MAX_JOURNAL_BYTES: u64 = 16 << 20;
 
@@ -115,7 +115,7 @@ impl Store {
                     prior.status == Status::Started
                         && matches!(
                             receipt.status,
-                            Status::Succeeded | Status::Failed | Status::Blocked
+                            Status::Succeeded | Status::Failed | Status::Blocked | Status::Rejected
                         ),
                     "invalid receipt lifecycle"
                 );
@@ -130,7 +130,12 @@ impl Store {
                 ensure!(
                     receipt.status == Status::Started
                         || (receipt.operation == Operation::Lookup
-                            && matches!(receipt.status, Status::Miss | Status::Blocked)),
+                            && matches!(
+                                receipt.status,
+                                Status::Miss | Status::Blocked | Status::Review
+                            ))
+                        || (receipt.operation == Operation::Reject
+                            && receipt.status == Status::Rejected),
                     "terminal receipt lacks a start"
                 );
             }
@@ -212,6 +217,87 @@ impl Store {
         identifier(key)?;
         identifier(id)?;
         self.write(&self.root.join("entries").join(format!("{key}.json")), &id)
+    }
+
+    pub fn record(&self, id: &str) -> Result<Option<LearnedRecord>> {
+        identifier(id)?;
+        let record: Option<LearnedRecord> =
+            self.read(&self.root.join("records").join(format!("{id}.json")))?;
+        if let Some(record) = &record {
+            ensure!(record.id == id, "record identity does not match its path");
+        }
+        Ok(record)
+    }
+
+    /// Bounded enumeration for near-match review. Sorted for determinism.
+    pub fn records(&self) -> Result<Vec<LearnedRecord>> {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(self.root.join("records"))? {
+            let path = entry?.path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if name.len() == 69 && name.ends_with(".json") {
+                paths.push(path);
+            }
+        }
+        ensure!(
+            paths.len() <= 1000,
+            "more than 1000 records; archive state before review"
+        );
+        paths.sort();
+        let mut records = Vec::with_capacity(paths.len());
+        for path in paths {
+            let record: Option<LearnedRecord> = self.read(&path)?;
+            if let Some(record) = record {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
+    pub fn rejections(&self) -> Result<Vec<Rejection>> {
+        let path = self.root.join("reviews.jsonl");
+        let mut file = match private_options().read(true).open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        ensure!(
+            file.metadata()?.len() <= (MAX_JSON_BYTES as u64),
+            "review log is too large"
+        );
+        let mut body = String::new();
+        Read::by_ref(&mut file).read_to_string(&mut body)?;
+        ensure!(
+            body.is_empty() || body.ends_with('\n'),
+            "review log has a torn tail"
+        );
+        let mut rejections = Vec::new();
+        for (line, row) in body.lines().enumerate() {
+            rejections.push(
+                serde_json::from_str(row)
+                    .with_context(|| format!("corrupt review log at line {}", line + 1))?,
+            );
+        }
+        Ok(rejections)
+    }
+
+    pub fn append_rejection(&self, rejection: &Rejection) -> Result<()> {
+        let mut row = serde_json::to_vec(rejection)?;
+        row.push(b'\n');
+        let mut file = private_options()
+            .append(true)
+            .create(true)
+            .open(self.root.join("reviews.jsonl"))?;
+        ensure!(
+            file.metadata()?.len() + row.len() as u64 <= MAX_JSON_BYTES as u64,
+            "review log is too large"
+        );
+        file.write_all(&row)?;
+        file.sync_all()?;
+        Ok(())
     }
 
     pub fn entry(&self, key: &str) -> Result<Option<LearnedRecord>> {

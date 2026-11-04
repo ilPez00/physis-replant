@@ -1,9 +1,9 @@
 [package]
 name = "physis-replant"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
-license = "BUSL-1.1 AND Apache-2.0"
+license = "Apache-2.0"
 description = "Persist verified AI tool recipes and re-execute them locally without repeat inference."
 repository = "https://github.com/ilPez00/physis-replant"
 keywords = ["ai", "cost", "crystallization", "memoization", "agent"]

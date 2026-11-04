@@ -13,6 +13,7 @@ pub mod cascade;
 pub mod compile;
 pub mod deterministic;
 pub mod ids;
+pub mod mcp;
 mod runner;
 pub mod server;
 mod store;
@@ -20,8 +21,9 @@ pub mod trace;
 pub mod workflow;
 
 pub use workflow::{
-    LearnedRecord, Memo, Operation, Receipt, Recipe, RecordInput, Request, Stats, Status, ToolCall,
-    ToolKind, ToolRegistry, ToolSpec,
+    similarity, LearnedRecord, Memo, Operation, Receipt, Recipe, RecordInput, Rejection, Request,
+    ReviewCandidate, ReviewInput, Stats, Status, ToolCall, ToolKind, ToolRegistry, ToolSpec,
+    REVIEW_THRESHOLD,
 };
 
 pub use cascade::Cascade;

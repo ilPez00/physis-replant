@@ -1,22 +1,30 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.3.0 — Apache-2.0 open core
+
+### Added
+- **MCP stdio server** (`replant mcp`): 7 tools over JSON-RPC 2.0.
+- **Near-match review queue**: exact misses propose up to three candidates with
+  the same context and token similarity ≥ 0.80; nothing executes until
+  `approve`. `reject` suppresses a candidate for that request.
+- **Compensation and explicit undo**: recipes may declare `undo` tools; they run
+  in reverse after a failed check, or on `undo <record-id>`. Replay stays blocked
+  after an undo until a new record.
+- **n8n community node** (`n8n-nodes-replant/`): run, record, inspect, stats,
+  approve, reject, undo; credential with health check.
+- **Python SDK** (stdlib) and **TypeScript SDK** (JS + `.d.ts`, no build step).
+- **LangChain, CrewAI and AutoGen adapters** (optional, lazy imports).
+- HTTP bridge routes for `/approve`, `/reject`, `/undo`, `/stats`.
 
 ### Changed
-- Replace in-memory response memoization with persistent verified tool recipes.
-  This is a breaking API correction: use `Memo::open`, `record`, `run`, `inspect`,
-  `history` and `stats` with `Request`/`RecordInput`; placeholder `MemoKey`,
-  `MemoResult`, `CostReport`, `Tier` and no-op `flush` are removed.
-- Implement real stdin/stdout JSON CLI commands instead of ignoring arguments.
-- Add `replant serve`: bearer-authenticated HTTP bridge (`/run`, `/record`,
-  `/healthz`) for Dockerized n8n; refuses unspecified bind addresses.
-- Retain full structured traces and versioned memorizer decisions across restarts.
-- Withdraw synthetic performance/correctness claims; add measured process tests.
+- **Relicensed the core to Apache-2.0.** v0.1.x and v0.2.0 remain BSL-1.1; this
+  release and later are Apache-2.0.
+- `BTreeSet`-based token similarity for review; no embeddings, no semantic
+  model, no auto-replay.
+- Receipts gain `candidates`; stats gain review/reject/undo counters.
+- Test suite: 54 Rust tests plus Node and Python SDK/node tests.
 
 ### Safety
-- Independent postchecks, optional preconditions, request-scoped recipes and
-  executable/declared implementation fingerprints guard automatic reuse.
-- Failed/interrupted runs block replay. Corruption is an error, not a reset.
-- Bound process time, pipe memory and input; serialize store updates with OS locks.
-- Restore canonical BSL covenants and preserve extracted Apache portions/notices.
-  Source-available status is explicit; commercial legal review remains outstanding.
+- Review approval re-executes actions and checks; it does not trust the candidate.
+- Compensation is best-effort and operator-declared, not a transaction.
+- Cross-context approval is refused; policy/engine fingerprints still apply.

@@ -9,7 +9,7 @@ Record a verified tool recipe once. Re-run the **real actions and checks** forev
 [![CI](https://github.com/ilPez00/physis-replant/actions/workflows/ci.yml/badge.svg)](https://github.com/ilPez00/physis-replant/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/rust-1.89%2B-orange)
 ![Status](https://img.shields.io/badge/status-experimental-yellow)
-![License](https://img.shields.io/badge/license-BUSL--1.1-blue)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 ---
 
@@ -128,23 +128,60 @@ Record/replay is a crowded space for **debugging** (agentrr, tracefork, hetu, ag
 
 Not a sandbox: tools run as the current user, and registry authorization is not a permission system. See the limits in [`README`](README.md#safety-and-limits) and the n8n notes.
 
-## Roadmap (highest leverage first)
+## Interfaces
 
-1. **MCP server** — expose `run/record/inspect/stats` as tools so any MCP agent gets crystallization for free.
-2. **n8n community node** — native `replant run/record` operations, no HTTP workaround.
-3. **TypeScript/Python SDKs** + LangChain/CrewAI/AutoGen adapters.
-4. **Semantic request matching** with an explicit confidence threshold and a “near-miss” review queue.
-5. **Compensation/undo recipes** for reversible actions.
-6. **Signed receipts + policy sync** for teams (the paid layer).
+| Interface | Use it for |
+|---|---|
+| CLI | `run`, `record`, `approve`, `reject`, `undo`, `show`, `history`, `stats` |
+| HTTP bridge (`replant serve`) | n8n or any language; bearer auth, `/run`, `/record`, `/approve`, `/reject`, `/undo`, `/stats` |
+| **MCP server** (`replant mcp`) | any MCP agent; 7 tools, stdio JSON-RPC |
+| **n8n community node** | `n8n-nodes-replant/`, native operations + credential |
+| **Python SDK** | `sdk/python/replant_client.py`, stdlib only |
+| **TypeScript SDK** | `sdk/typescript/`, JS + `.d.ts`, no build step |
+| **Adapters** | LangChain, CrewAI, AutoGen shims in `sdk/python/adapters/` |
 
-## Commercial
+MCP configuration:
 
-The core is source-available under BSL 1.1: free for personal, non-commercial, and non-profit production use; business production use needs a commercial license. It converts to Apache-2.0 on 2030-11-04.
+```json
+{"mcpServers":{"replant":{"command":"replant","args":["mcp","--store","/private/state","--tools","/operator/tools.json"]}}}
+```
 
-If you want maximum adoption and a paid business, the proven shape is **open-core**: Apache-2.0 core, paid hosted registry/audit/SSO/policy sync. That is the recommended path; it is not what this repository currently ships.
+## Near-match review and undo
+
+Exact match is the default. When an exact request misses, `run` proposes up to
+three **near matches** (same context, token similarity ≥ 0.80) with
+`status: review`. Nothing executes until a human or policy calls `approve`; a
+`reject` suppresses that candidate for that request. Approve re-executes the
+candidate recipe under the new request and only learns it if the checks pass.
+
+Recipes may declare `undo` steps (registered as `kind: "undo"`). They run in
+reverse when an action succeeds and a later check fails, and can be invoked
+explicitly with `undo <record-id>`. Compensation is operator-declared, not a
+transaction: a failed undo is reported, and replay stays blocked until a new
+record.
+
+## Roadmap
+
+1. ~~MCP server~~ — shipped in v0.3.
+2. ~~n8n community node~~ — shipped as a node package; not yet on npm.
+3. ~~SDKs + framework adapters~~ — shipped as thin, tested clients/shims.
+4. ~~Near-match review queue~~ — shipped with token similarity; embeddings are not used.
+5. ~~Compensation/undo recipes~~ — shipped, operator-declared.
+6. **Signed receipts + team policy sync** — the planned commercial layer.
+
+## License
+
+Apache-2.0 for the entire core. No open-source feature gates, no BSL.
+
+The planned commercial layer is separate and hosted/team-oriented: policy sync,
+signed receipts, SSO, audit retention, and a managed recipe registry. It is not
+in this repository. That is the open-core split.
 
 ## Status
 
-v0.2.0, experimental. Tested on Linux: 47 tests, real CLI/subprocess effects, restart persistence, concurrent writers, corruption, timeouts, and a live n8n 2.46 record→replay loop. Not yet published to crates.io.
+v0.3.0, experimental. Tested on Linux: 54 Rust tests plus Node/Python SDK and
+node tests; real CLI/subprocess effects, restart persistence, concurrent writers,
+corruption, timeouts, near-match approval/rejection, compensation, MCP stdio, and
+a live n8n 2.46 record→replay loop. Not yet published to crates.io or npm.
 
 If this saves you a model bill, star it and tell me which workflow you crystallized. If it breaks, open an issue with the receipt JSON — the journal is designed to make that debuggable.
