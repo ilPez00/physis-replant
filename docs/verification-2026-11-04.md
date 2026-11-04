@@ -174,10 +174,23 @@ N=10: 90%, N=100: 99%). A changed request/context/tool implementation forces a
 new LLM call, as the claim matrix above shows. This is the crystallization win:
 repeated tasks stop paying for inference, not merely for cached prompt bytes.
 
+A 100-iteration run against the free OpenRouter model
+`nvidia/nemotron-3-ultra-550b-a55b:free` produced:
+
+| arm | LLM calls | prompt tokens | completion tokens | total tokens | wall time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| baseline | 100 | 7,800 | 8,412 | 16,212 | 373.33 s |
+| replant | 1 | 78 | 84 | 162 | 22.58 s |
+| saved | 99 | 7,722 | 8,328 | **16,050 (99.0%)** | 350.75 s |
+
+Both arms completed 100 real increments and 100 checks; the replant arm recorded
+once and replayed 99 times. The measured 99.0% matches `1 - 1/100`.
+
 Limits: the local model's completion tokens include its reasoning, so absolute
 counts would differ on another model; prompt caching could reduce the baseline's
-cached input price but does not eliminate its output tokens or calls. This is a
-synthetic one-step task, not a production agent workflow.
+cached input price but does not eliminate its output tokens or calls. The
+OpenRouter model is free, so the dollar column is a separate example price, not
+billing. This is a synthetic one-step task, not a production agent workflow.
 
 ## Remaining boundaries
 

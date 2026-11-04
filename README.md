@@ -1,179 +1,150 @@
 # physis-replant
 
-**Learn a verified tool recipe once. Execute its actions again without repeat inference.**
+### Stop paying an LLM to do the same task twice.
 
-Standalone Rust library and JSON CLI for local, self-hosted automation. It stores
-the complete request, structured cognition trace and recipe, plus a versioned
-journal of the memorizer's own record/replay decisions. A replay **executes the
-actions and checks again**; it does not return an old side-effect response.
+Record a verified tool recipe once. Re-run the **real actions and checks** forever after — no inference, no cached side-effect responses. Local, auditable, and deliberately narrow.
 
-Status: experimental v0.2.0, Unix process execution (tested on Linux).
-**Source-available**, not OSI open source. No dependency on physis-next, no model
-SDK, provider calls, telemetry, scheduler or hosted service.
+**Measured on 100 repeated runs: 99% fewer LLM tokens (100 calls → 1, 16,212 → 162 tokens).** All 100 real actions and 100 independent checks still ran.
 
-## Try it
+[![CI](https://github.com/ilPez00/physis-replant/actions/workflows/ci.yml/badge.svg)](https://github.com/ilPez00/physis-replant/actions/workflows/ci.yml)
+![Rust](https://img.shields.io/badge/rust-1.89%2B-orange)
+![Status](https://img.shields.io/badge/status-experimental-yellow)
+![License](https://img.shields.io/badge/license-BUSL--1.1-blue)
+
+---
+
+## The problem
+
+Agents are great at figuring out a task once and terrible at remembering it.
+
+A recurring workflow — sync a CRM, reconcile a file, restart a service, build a report — pays the model again on every run. Prompt caching discounts the prefix, but the model still runs, still emits tokens, and can still choose a different tool call. Workflow-memory tools inject a plan into the prompt; the model still gets called.
+
+`replant` records the **typed tool recipe** behind a successful run, verifies it with independent checks, and re-executes that recipe on later identical requests. The model is not consulted again until something actually changes.
+
+## How it works
+
+```
+first request ──▶ your LLM/planner ──▶ typed recipe ──▶ execute actions ──▶ independent checks
+                                                              │
+                                                              ▼
+                                                     persist + receipt
+later request ──▶ exact request match? ──▶ re-execute actions ──▶ checks ──▶ receipt
+                         │ no
+                         ▼
+                    status: miss  (call the planner again)
+```
+
+The engine never returns a cached tool result as if the action happened. It runs the action and the check again, every time.
+
+## What gets remembered
+
+- the exact `{prompt, input, context}` request,
+- the structured cognition/provenance trace,
+- the typed recipe (registered tool names + JSON inputs),
+- the tool/registry/engine fingerprints that produced it,
+- every record/replay decision in an append-only receipt journal.
+
+A replay is denied when the request, context, tool implementation, registry, or engine changed; when a prior execution failed or was interrupted; or when the journal/index is inconsistent. Failures are errors or `blocked`, never a silent retry of partial work.
+
+## Quickstart
 
 ```sh
-cargo build --locked --release
-python3 scripts/benchmark.py --binary target/release/replant --iterations 10
-```
+cargo build --release
 
-The benchmark creates harmless temporary counter/check tools. Baseline plans on
-every iteration; replay plans only on the first miss. Both must actually perform
-and independently verify every increment. It reports wall time and planner-call
-counts, not an assumed speedup. **Its local planner fixture is not a live model,
-and its process loop is not a live n8n runtime benchmark.**
-
-Install from this checkout with `cargo install --locked --path .`. Nothing has
-been published to crates.io or GitHub by this change.
-
-## Workflow
-
-1. `run`: look up an exact `{prompt,input,context}` request.
-2. On `status:miss`, your existing AI/planner proposes a recipe and trace.
-3. `record`: validate every tool call, execute actions and independently
-   registered checks, and persist the successful recipe automatically.
-4. The next `run` executes that recipe and its checks, with no planner call.
-5. A changed request, tool implementation, registry or engine invalidates reuse.
-   An execution/check failure or unresolved crash **blocks** automatic reuse.
-
-The planner must **not execute the proposed actions before record**, because
-record executes them itself. Replant does not intercept arbitrary existing AI
-sessions or learn arbitrary programs from prose. A caller must supply a typed
-recipe over an operator-owned tool registry. Cognition traces are retained as
-structured JSON, including additional spans; caller-provided reasoning is not
-treated as proof. The memorizer records its version, strategy, policy hash and
-decisions; it does not recursively rewrite or optimize itself.
-
-## JSON CLI
-
-```sh
-replant run    --store /private/state --tools /operator/tools.json < request.json
-replant record --store /private/state --tools /operator/tools.json < record.json
-replant show   --store /private/state < request.json
-replant history --store /private/state
-replant stats   --store /private/state
-replant --help
-```
-
-One JSON value on stdin, JSON only on stdout. Exit 0: success, lookup miss or
-help. Exit 1: invalid input, failed execution, blocked replay or corrupt state.
-The default state directory is `.replant`. Read-only inspection needs no tools.
-
-Request:
-
-```json
-{"prompt":"increment once","input":{"amount":1},"context":{"tenant":"demo","workflow":"counter-v1"}}
-```
-
-Record envelope (the request must be the original, not model-rewritten input):
-
-```json
+# 1. Register trusted tools. A model may name them, never choose an executable.
+cat > tools.json <<'JSON'
 {
-  "request":{"prompt":"increment once","input":{"amount":1},"context":{"tenant":"demo","workflow":"counter-v1"}},
-  "recipe":{
-    "steps":[{"tool":"increment","input":{"amount":1}}],
-    "checks":[{"tool":"verify","input":{}}]
+  "increment": {
+    "kind": "action",
+    "program": "/usr/bin/python3",
+    "args": ["examples/fixture_tools.py", "increment", "/tmp/replant-demo"],
+    "fingerprint_files": ["examples/fixture_tools.py"],
+    "timeout_ms": 2000
   },
-  "trace":{"provider":"your external planner","spans":[{"selected":"increment"}]}
-}
-```
-
-Registry entries, authored by the operator, bind names to **fixed** executable
-paths and argv. A model may supply only a registered name and JSON input:
-
-```json
-{
-  "increment":{
-    "kind":"action","program":"/usr/bin/python3",
-    "args":["/operator/counter.py","increment","/private/counter"],
-    "fingerprint_files":["/operator/counter.py"],"timeout_ms":2000
-  },
-  "verify":{
-    "kind":"check","program":"/usr/bin/python3",
-    "args":["/operator/counter.py","verify","/private/counter"],
-    "fingerprint_files":["/operator/counter.py"],"timeout_ms":2000
+  "verify": {
+    "kind": "check",
+    "program": "/usr/bin/python3",
+    "args": ["examples/fixture_tools.py", "verify", "/tmp/replant-demo"],
+    "fingerprint_files": ["examples/fixture_tools.py"],
+    "timeout_ms": 2000
   }
 }
+JSON
+
+# 2. Ask: does this exact task already have a verified recipe?
+echo '{"prompt":"increment once","input":{"amount":1},"context":{"workflow":"demo-v1"}}' \
+  | replant run --store /tmp/replant-state --tools tools.json
+# -> {"status":"miss", ...}
+
+# 3. Let the planner supply a recipe once. record executes and checks it.
+echo '{"request":{...},"recipe":{"steps":[{"tool":"increment","input":{"amount":1}}],"checks":[{"tool":"verify","input":{}}]},"trace":{...}}' \
+  | replant record --store /tmp/replant-state --tools tools.json
+# -> {"status":"succeeded","operation":"record", ...}
+
+# 4. Repeat the same request. No planner. The action and check run again.
+echo '{"prompt":"increment once","input":{"amount":1},"context":{"workflow":"demo-v1"}}' \
+  | replant run --store /tmp/replant-state --tools tools.json
+# -> {"status":"succeeded","operation":"replay","provider_calls":0, ...}
 ```
 
-Each tool receives its JSON input on stdin. It must exit zero and emit one JSON
-object containing `"ok":true`. Check tools must inspect actual outcomes rather
-than accepting a model's assertion. Optional recipe `preconditions` use check
-tools and run **before** any action. See `examples/fixture_tools.py` for the
-harmless counter fixture; it is not a production access-control implementation.
+Full request/record shapes and the n8n adapter: [`examples/n8n/README.md`](examples/n8n/README.md).
 
-## n8n
+## Measured, not asserted
 
-n8n normally runs in Docker, so the workflow cannot execute a host binary. Use
-the HTTP bridge (`replant serve`) and call it from an HTTP Request node:
+`scripts/llm_cost_benchmark.py` runs the same task twice: baseline calls the LLM on every iteration; replant calls it once and replays. Both arms execute the real action and independent check every time.
 
-```sh
-replant serve --bind 172.17.0.1:8799 --store /private/state \
-  --tools /operator/tools.json --token-file /private/token
-```
+Two real runs, real API token usage, real side effects and checks in both arms:
 
-`POST /run` and `POST /record` mirror the CLI; `GET /healthz` is unauthenticated.
-Every other route requires `Authorization: Bearer <token>`. Status: `200`
-succeeded/miss, `409` blocked, `422` failed. The bind must name one interface
-(`0.0.0.0` refused). No TLS.
+| iterations | model | LLM calls | total tokens | wall time | tokens saved |
+|---:|---|---:|---:|---:|---:|
+| 100 | `nvidia/nemotron-3-ultra-550b-a55b:free` (OpenRouter) | 100 → 1 | 16,212 → 162 | 373.3 s → 22.6 s | **99.0%** |
+| 5 | local `gemma4-e2b` gateway | 5 → 1 | 2,260 → 452 | 18.4 s → 4.5 s | 80.0% |
 
-[Wiring, registry and import steps](examples/n8n/README.md). The generated
-workflow embeds its bearer token so it imports without credential setup; replace
-it with an n8n header credential for shared instances. Not an n8n Cloud
-integration.
+All 100 baseline iterations recorded/executed; the replant arm recorded once and replayed 99 times. Both arms performed every real increment and passed every check. For N identical runs the call count is N versus 1, so token reduction approaches `1 - 1/N`. The first run still pays; any real change forces a new call.
 
-## Safety and limits
+See [`docs/verification-2026-11-04.md`](docs/verification-2026-11-04.md) for the claim matrix, failure cases, restart persistence, and the LLM benchmark.
 
-- Registry authorization is **not a sandbox**. Tools execute as the current OS
-  user. Register only trusted, input-validating implementations with appropriate
-  tenant/resource permissions; do not expose arbitrary executables or code to AI.
-- Include relevant tenant, authorization, policy and external dependency versions
-  in `context`; declare script/config files in `fingerprint_files`. Undeclared
-  external state changes cannot be inferred. Use preconditions for mutable state.
-- Storage is private plaintext (0700 directories, 0600 new files on Unix), not
-  encryption. Requests, traces and tool outputs may contain sensitive data: keep
-  secrets out, protect the volume, and set your own retention policy. No uploads.
-- A global OS lock serializes one store. Use a local filesystem with reliable
-  locking/fsync, not independent worker volumes or an unverified network mount.
-- There is no rollback or exactly-once guarantee. A tool may change state before
-  a later check fails. Do not retry or re-record until effects are inspected.
-  Killing the CLI can leave tool descendants alive; tools must not daemonize or
-  escape their process group. Pipe reads/writes share the configured deadline.
-- Max 1 MiB request/record, 128 registered tools, 32 recipe calls, 64 KiB per tool
-  input/stdout/stderr, timeout 1..120000 ms per tool. Journal stops at 16 MiB:
-  archive the whole store explicitly rather than silently dropping evidence.
-- Receipts prove what trusted tools reported and the engine observed; they are
-  not signed attestations or formal proof. `provider_calls:0` describes Replant
-  only, not an external n8n AI node or a tool that itself calls a provider.
+## Not another cache
 
-## Tests and honest metrics
+| | Prompt cache | Response replay<br>(agentrr, tracefork) | Workflow memory<br>(AWM) | **replant** |
+|---|---|---|---|---|
+| Repeats the real action? | no | no — returns recorded bytes | no — injects a plan into the prompt | **yes** |
+| Runs independent checks before reuse? | no | no | no | **yes** |
+| Invalidates on tool implementation change? | no | no | no | **yes** |
+| Works for side-effecting tools? | n/a | no (replay must avoid side effects) | n/a | **yes, explicitly** |
+| Local / self-hosted? | provider-side | varies | varies | **yes** |
+| Audit trail for every decision? | no | partial | no | **yes** |
 
-```sh
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-```
+Record/replay is a crowded space for **debugging** (agentrr, tracefork, hetu, agent-blackbox) and for **browser actions** (Stagehand/Browserbase). `replant` is for the narrower, harder case: repeated side-effecting automation where a stale or wrong replay is worse than paying for a model call.
 
-Regressions exercise separate CLI processes, actual side effects, independent
-checks, full trace retention, context/implementation drift, crashes, concurrent
-writers, timeouts, malformed output and corrupt state. Statistics count completed
-record/replay executions. `replay_share_percent` is verified replays divided by
-all execution attempts, including failed/pending ones; lookups are excluded.
-It is not a measured token, money or latency saving.
+## Safety model
 
-The old v0.1 "80% savings / 5x speedup / 100% correctness" benchmark was synthetic
-accounting and is withdrawn as effectiveness evidence. Legacy cognition helpers
-remain available, but substring rule selection is **not** the workflow runtime.
+- **Operator-owned tools.** A model chooses only a registered name and JSON input. Executable and argv are fixed by the operator.
+- **Independent checks.** A recipe with no check is rejected. Checks must inspect real state, not trust the planner.
+- **Fail closed.** Failed/interrupted runs block replay until an explicit re-record. Corrupt state is an error, not a reset.
+- **Exact invalidation.** Request, context, tool/registry/engine fingerprints are part of the match.
+- **Bounded.** 1 MiB requests, 32 calls per recipe, 64 KiB per tool I/O, per-tool timeouts, process-group cleanup.
+- **No rollback, no exactly-once.** A check can fail after an action ran. Inspect effects before re-recording.
 
-## License
+Not a sandbox: tools run as the current user, and registry authorization is not a permission system. See the limits in [`README`](README.md#safety-and-limits) and the n8n notes.
 
-New replay implementation: [Business Source License 1.1](LICENSE). Personal,
-non-commercial production use and non-profit use are permitted without a fee.
-Business production use requires a separate commercial license; non-production
-evaluation remains permitted by BSL. Converts to Apache-2.0 on 2030-11-04 (or
-the earlier change required by BSL). Commercial terms are not set up here.
+## Roadmap (highest leverage first)
 
-Extracted Apache portions remain Apache-2.0: [NOTICE](NOTICE),
-[LICENSE-APACHE](LICENSE-APACHE). Existing Apache permissions are not revoked.
-Legal review of commercial terms and copyright ownership is still required
-before a commercial release; this README is not legal advice.
+1. **MCP server** — expose `run/record/inspect/stats` as tools so any MCP agent gets crystallization for free.
+2. **n8n community node** — native `replant run/record` operations, no HTTP workaround.
+3. **TypeScript/Python SDKs** + LangChain/CrewAI/AutoGen adapters.
+4. **Semantic request matching** with an explicit confidence threshold and a “near-miss” review queue.
+5. **Compensation/undo recipes** for reversible actions.
+6. **Signed receipts + policy sync** for teams (the paid layer).
+
+## Commercial
+
+The core is source-available under BSL 1.1: free for personal, non-commercial, and non-profit production use; business production use needs a commercial license. It converts to Apache-2.0 on 2030-11-04.
+
+If you want maximum adoption and a paid business, the proven shape is **open-core**: Apache-2.0 core, paid hosted registry/audit/SSO/policy sync. That is the recommended path; it is not what this repository currently ships.
+
+## Status
+
+v0.2.0, experimental. Tested on Linux: 47 tests, real CLI/subprocess effects, restart persistence, concurrent writers, corruption, timeouts, and a live n8n 2.46 record→replay loop. Not yet published to crates.io.
+
+If this saves you a model bill, star it and tell me which workflow you crystallized. If it breaks, open an issue with the receipt JSON — the journal is designed to make that debuggable.
