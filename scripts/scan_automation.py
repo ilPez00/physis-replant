@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read-only n8n/prospect audits. Receipts attest the scan, not customer savings."""
 import argparse
+import fcntl
 import hashlib
 import http.client
 import ipaddress
@@ -8,8 +9,14 @@ import json
 import os
 import pathlib
 import re
+import secrets
+import shutil
 import socket
 import ssl
+import subprocess
+import sys
+import tempfile
+import time
 import urllib.parse
 from html.parser import HTMLParser
 
@@ -150,7 +157,7 @@ def analyze_workflows(workflows, executions):
         seen[key] = signature
         node_map = maps.get(str(ex.get("workflowId", "")))
         if node_map is None:
-            if len(workflows) != 1:
+            if ex.get("workflowId") is not None or len(workflows) != 1:
                 raise ValueError("cannot attribute execution to a workflow")
             node_map = next(iter(maps.values()))
         for name, runs in ex["data"]["resultData"]["runData"].items():
@@ -225,14 +232,16 @@ def collect(config):
             raise ValueError("provide 1..5 explicit public URLs per scan")
         prospects = []
         for url in urls:
-            body, _ = fetch(url, public=True)
+            body, content_type = fetch(url, public=True)
+            if not any(kind in content_type.lower() for kind in ("text/html", "text/plain")):
+                raise ValueError("prospect URL must return HTML or plain text")
             page = Page()
             page.feed(body.decode("utf-8", errors="replace"))
             text = " ".join(page.text).lower()
             prospects.append({"url": url, "page_title": label(" ".join(page.title)),
                               "matched_terms": [word for word in ("n8n", "automation", "ai agent", "token", "workflow") if word in text],
                               "source_sha256": digest(body), "buying_intent": "unknown", "contacted": False})
-        return {"prospects": prospects, "customer_savings": None, "customer_workflows_executed": False}
+        return {"prospects": prospects, "customer_savings": None, "replay_eligibility": "unverified", "customer_workflows_executed": False}
 
     if mode == "api":
         base = config["instance"].rstrip("/")
@@ -242,8 +251,8 @@ def collect(config):
         if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", config["key_env"]):
             raise ValueError("API key must be named by an environment variable")
         key = os.environ.get(config["key_env"])
-        if not key:
-            raise ValueError("API key environment variable is missing")
+        if not key or not 16 <= len(key) <= 8192:
+            raise ValueError("API key environment variable must contain 16..8192 characters")
         limit = config.get("limit", 100)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("execution limit must be 1..100")
@@ -251,8 +260,11 @@ def collect(config):
         bodies = [fetch(base + suffix, {"X-N8N-API-KEY": key})[0] for suffix in (
             "/api/v1/workflows/" + config["workflow_id"], "/api/v1/executions?" + query)]
         wf, page = map(read_json, bodies)
+        if not isinstance(wf, dict) or str(wf.get("id")) != config["workflow_id"]:
+            raise ValueError("workflow API returned a different workflow")
         if not isinstance(page, dict) or not isinstance(page.get("data"), list):
             raise ValueError("unsupported execution API page")
+        wf = json.loads(json.dumps(wf).replace(json.dumps(key)[1:-1], "[redacted]"))
         workflows, executions = [wf], page["data"]
         complete = not bool(page.get("nextCursor"))
         sources = [{"kind": kind, "sha256": digest(body)} for kind, body in zip(("workflow_api", "executions_api"), bodies)]
@@ -280,4 +292,243 @@ def collect(config):
         raise ValueError("unknown scan mode")
     report = analyze_workflows(workflows, executions)
     report.update(sources=sources, coverage={"complete": complete, "scope": "supplied exports or selected workflow execution page; not account-wide"})
+    if mode == "api":
+        # Known active credential must not escape even if an upstream label echoes it.
+        report = json.loads(json.dumps(report).replace(json.dumps(key)[1:-1], "[redacted]"))
     return report
+
+
+OWNER = "replant-read-only-audit-v1"
+
+
+def write_atomic(path, body):
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+        temporary = pathlib.Path(stream.name)
+        try:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()  # Only this invocation's own temporary file.
+
+
+def write_json(path, value):
+    write_atomic(path, (json.dumps(value, sort_keys=True, indent=2) + "\n").encode())
+
+
+def private_json(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        body = stream.read(MAX_BODY + 1)
+    if len(body) > MAX_BODY:
+        raise ValueError("private artifact exceeds size limit")
+    return read_json(body)
+
+
+def owned_root(path, initialize=False):
+    if path.is_symlink():
+        raise ValueError("output root must not be a symlink")
+    if initialize:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    metadata = path.stat()
+    if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+        raise ValueError("output root must be owned by you and private (0700)")
+    marker = path / "owner.json"
+    if initialize and not marker.exists():
+        if any(path.iterdir()):
+            raise ValueError("refusing unrelated existing output files")
+        write_json(marker, {"format": OWNER})
+    if private_json(marker) != {"format": OWNER}:
+        raise ValueError("output directory does not belong to this scanner")
+    for name in ("config.json", "attempt.json", "report.json", "report.md", "report.sha256", "latest.json", "receipts", "state", "tools.json"):
+        if (path / name).is_symlink():
+            raise ValueError("refusing symlink in owned output directory")
+    return path
+
+
+def markdown(report):
+    return ("# Read-only automation audit\n\n"
+            "This receipt verifies the scan, not execution of customer workflows.\n"
+            "Static opportunities are candidates. Customer savings and safe replay remain unmeasured.\n"
+            "Review labels before sharing; no parameters, prompts or authorization headers are included.\n\n"
+            "```json\n" + json.dumps(report, sort_keys=True, indent=2) + "\n```\n")
+
+
+def worker(phase, root, payload):
+    owned_root(root)
+    config = private_json(root / "config.json")
+    expected = digest(config)
+    attempt = private_json(root / "attempt.json")
+    if payload != {"config_sha256": expected} or attempt["config_sha256"] != expected:
+        raise ValueError("configuration/challenge binding mismatch")
+    if phase == "_scan":
+        findings = collect(config)
+        report = {"schema": 1, "receipt_scope": "read_only_scan_not_customer_execution",
+                  "config_sha256": expected, "challenge": attempt["nonce"], "created_at_ns": time.time_ns(),
+                  "findings": findings}
+        write_json(root / "report.json", report)
+        write_atomic(root / "report.md", markdown(report).encode())
+        artifact = digest((root / "report.json").read_bytes())
+        write_atomic(root / "report.sha256", artifact.encode())
+    elif phase == "_check":
+        report = private_json(root / "report.json")
+        if report.get("schema") != 1 or report.get("receipt_scope") != "read_only_scan_not_customer_execution":
+            raise ValueError("invalid audit artifact schema/scope")
+        if report.get("challenge") != attempt["nonce"] or report.get("config_sha256") != expected:
+            raise ValueError("artifact belongs to a different scan attempt")
+        findings = report["findings"]
+        if findings.get("customer_savings") is not None or findings.get("customer_workflows_executed") is not False or findings.get("replay_eligibility") != "unverified":
+            raise ValueError("audit artifact asserts an unmeasured customer outcome")
+        if config["mode"] != "prospects":
+            usage = findings["usage"]
+            counts = [usage[k] for k in ("observed_model_responses", "unmeasured_responses", "duplicate_exports_skipped")]
+            tokens = usage["known_tokens"]
+            values = [tokens[k] for k in ("prompt_tokens", "completion_tokens", "total_tokens")]
+            if any(type(v) is not int or v < 0 for v in counts + values) or values[2] != values[0] + values[1]:
+                raise ValueError("inconsistent usage counts or token totals")
+            measured, missing, _ = counts
+            status = "partial" if missing else "observed" if measured else "unknown"
+            total = values[2] if measured and not missing else None
+            if usage["status"] != status or usage["total_tokens"] != total or (not measured and any(values)):
+                raise ValueError("usage status/totals disagree with measured coverage")
+        for source in findings.get("sources", []) + findings.get("prospects", []):
+            value = source.get("sha256", source.get("source_sha256", ""))
+            if not re.fullmatch(r"[a-f0-9]{64}", value):
+                raise ValueError("missing source evidence hash")
+        if config["mode"] == "files":
+            expected_sources = [{"kind": s["kind"], "sha256": s["sha256"]} for s in config["files"]]
+            if findings.get("sources") != expected_sources:
+                raise ValueError("artifact source binding does not match configured inputs")
+            for source in config["files"]:
+                with pathlib.Path(source["path"]).open("rb") as stream:
+                    body = stream.read(MAX_BODY + 1)
+                if len(body) > MAX_BODY or digest(body) != source["sha256"]:
+                    raise ValueError("source changed during scan")
+        if (root / "report.md").read_text() != markdown(report):
+            raise ValueError("human-readable report does not match JSON artifact")
+        artifact = digest((root / "report.json").read_bytes())
+        if (root / "report.sha256").read_text() != artifact:
+            raise ValueError("audit artifact hash mismatch")
+    else:
+        raise ValueError("unknown worker phase")
+    return {"ok": True, "artifact_sha256": artifact}
+
+
+def audit(config, out, binary, force_record=False):
+    root = owned_root(out, initialize=True).resolve()
+    fd = os.open(root / "scan.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        owned_root(root)
+        config_hash = digest(config)
+        write_json(root / "config.json", config)
+        nonce = secrets.token_hex(32)
+        write_json(root / "attempt.json", {"nonce": nonce, "config_sha256": config_hash})
+        write_json(root / "latest.json", {"status": "started", "challenge": nonce})
+        tools = {name: {"kind": kind, "program": str(pathlib.Path(sys.executable).resolve()),
+                       "args": [str(pathlib.Path(__file__).resolve()), phase, str(root)],
+                       "fingerprint_files": [str(pathlib.Path(__file__).resolve()), str(root / "config.json")],
+                       "timeout_ms": 120000}
+                 for name, kind, phase in (("audit_scan", "action", "_scan"), ("audit_check", "check", "_check"))}
+        write_json(root / "tools.json", tools)
+        request = {"prompt": "Read-only automation audit", "input": {"config_sha256": config_hash},
+                   "context": {"audit": OWNER, "config_sha256": config_hash}}
+        record = {"request": request, "recipe": {"steps": [{"tool": "audit_scan", "input": request["input"]}],
+                  "checks": [{"tool": "audit_check", "input": request["input"]}]},
+                  "trace": {"provider": "none:deterministic-read-only-audit", "config_sha256": config_hash}}
+
+        def invoke(verb, value):
+            result = subprocess.run([str(binary), verb, "--store", str(root / "state"), "--tools", str(root / "tools.json")],
+                input=json.dumps(value), capture_output=True, text=True, timeout=260)
+            receipt = json.loads(result.stdout)
+            if not receipt.get("id"):
+                raise ValueError("Replant rejected the request before producing a receipt")
+            return receipt
+
+        receipt = invoke("record", record) if force_record else invoke("run", request)
+        if receipt["status"] == "miss":
+            receipt = invoke("record", record)
+        artifact = None
+        if receipt["status"] == "succeeded":
+            checked = worker("_check", root, request["input"])
+            artifact = checked["artifact_sha256"]
+            if any(call.get("output", {}).get("artifact_sha256") != artifact for call in receipt["calls"]):
+                raise ValueError("receipt outputs do not match current artifact")
+        if not re.fullmatch(r"[a-f0-9]{64}", receipt["id"]):
+            raise ValueError("invalid receipt id")
+        receipts = root / "receipts"
+        receipts.mkdir(mode=0o700, exist_ok=True)
+        bundle = {"receipt": receipt, "artifact_sha256": artifact,
+                  "receipt_scope": "scanner_execution_only", "customer_savings": None}
+        write_json(receipts / (receipt["id"] + ".json"), bundle)
+        write_json(root / "latest.json", bundle)
+        return bundle
+
+
+def main():
+    os.umask(0o077)
+    if len(sys.argv) > 1 and sys.argv[1] in ("_scan", "_check"):
+        try:
+            body = sys.stdin.buffer.read(65537)
+            if len(body) > 65536:
+                raise ValueError("worker input exceeds 64 KiB")
+            result = worker(sys.argv[1], pathlib.Path(sys.argv[2]), read_json(body))
+            code = 0
+        except Exception as error:
+            result, code = {"ok": False, "error": label(error)}, 1
+        print(json.dumps(result))
+        return code
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("files", "api", "prospects"))
+    parser.add_argument("--out", required=True, type=pathlib.Path)
+    parser.add_argument("--replant", default=os.environ.get("REPLANT_BIN") or shutil.which("replant") or str(pathlib.Path(__file__).resolve().parents[1] / "target/release/replant"))
+    parser.add_argument("--workflow", type=pathlib.Path)
+    parser.add_argument("--executions", type=pathlib.Path)
+    parser.add_argument("--instance-url")
+    parser.add_argument("--workflow-id")
+    parser.add_argument("--key-env", default="N8N_API_KEY")
+    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--url", action="append")
+    parser.add_argument("--record", action="store_true", help="Explicit re-record after inspecting a failed/blocked scan")
+    args = parser.parse_args()
+    try:
+        config = {"mode": args.mode}
+        if args.mode == "files":
+            if not args.workflow:
+                raise ValueError("files mode needs --workflow")
+            sources = []
+            for path, kind in ((args.workflow, "workflow"), (args.executions, "executions")):
+                if path:
+                    with path.open("rb") as stream:
+                        body = stream.read(MAX_BODY + 1)
+                    if len(body) > MAX_BODY:
+                        raise ValueError("input file exceeds size limit")
+                    sources.append({"path": str(path.resolve()), "kind": kind, "sha256": digest(body)})
+            config["files"] = sources
+        elif args.mode == "api":
+            if not args.instance_url or not args.workflow_id:
+                raise ValueError("api mode needs --instance-url and --workflow-id")
+            p = parsed_url(args.instance_url)
+            if p.query or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", args.workflow_id) or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", args.key_env) or not 1 <= args.limit <= 100:
+                raise ValueError("invalid API instance, workflow id, key variable or limit")
+            config.update(instance=args.instance_url, workflow_id=args.workflow_id, key_env=args.key_env, limit=args.limit)
+        else:
+            if not args.url:
+                raise ValueError("prospects mode needs explicit --url arguments")
+            if not 1 <= len(args.url) <= 5:
+                raise ValueError("provide 1..5 URLs")
+            for url in args.url:
+                parsed_url(url, public=True)
+            config["urls"] = args.url
+        bundle = audit(config, args.out, pathlib.Path(args.replant).resolve(), args.record)
+        print(json.dumps(bundle))
+        return 0 if bundle["receipt"]["status"] == "succeeded" else 1
+    except Exception as error:
+        print(json.dumps({"status": "failed", "error": label(error)}))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
