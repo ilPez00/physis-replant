@@ -73,3 +73,16 @@ test('HTTP errors raise ReplantError with the receipt', async () => {
     instance.close();
   }
 });
+
+test('inspect posts to the read-only endpoint', async () => {
+  const { instance, calls, url } = await server();
+  try {
+    const request = { prompt: 'p' };
+    await new ReplantClient(url, 'secret').inspect(request);
+    assert.equal(calls[0].url, '/inspect');
+    assert.equal(calls[0].method, 'POST');
+    assert.deepEqual(calls[0].body, request);
+  } finally {
+    instance.close();
+  }
+});

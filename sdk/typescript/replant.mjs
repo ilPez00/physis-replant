@@ -59,7 +59,7 @@ export class ReplantClient {
   }
 
   inspect(request) {
-    return this._request('POST', '/run', request);
+    return this._request('POST', '/inspect', request);
   }
 
   stats() {

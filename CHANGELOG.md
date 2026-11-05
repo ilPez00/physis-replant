@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- HTTP/SDK/n8n inspection is read-only via `POST /inspect`; missing records
+  return null (n8n wraps the result as `{record: ...}`).
+- n8n processes every input item with its own payload and preserves item links.
+- Near-match proposals and approvals require current fingerprints, an active
+  index, a successful verification receipt, and no later failed/interrupted or
+  undone execution. Failed and superseded records cannot be reused as candidates.
+
 ## 0.3.0 — Apache-2.0 open core
 
 ### Added

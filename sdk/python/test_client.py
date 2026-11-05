@@ -72,6 +72,12 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(Handler.calls[1][3]["candidate"], "a" * 64)
         self.assertEqual(Handler.calls[3][3]["id"], "c" * 64)
 
+    def test_inspect_uses_read_only_endpoint_and_preserves_null(self):
+        Handler.response = None
+        request = {"prompt": "absent"}
+        self.assertIsNone(ReplantClient(self.url, "secret").inspect(request))
+        self.assertEqual(Handler.calls, [("POST", "/inspect", "Bearer secret", request)])
+
     def test_http_errors_raise_with_the_receipt(self):
         client = ReplantClient(self.url, "bad")
         with self.assertRaises(ReplantError) as caught:

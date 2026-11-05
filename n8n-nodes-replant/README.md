@@ -29,7 +29,7 @@ The credential test calls `GET /healthz`.
 |---|---|---|
 | Run | `POST /run` | `{prompt,input,context}` |
 | Record | `POST /record` | `{request,recipe,trace}` |
-| Inspect | `POST /run` | `{prompt,input,context}` |
+| Inspect | `POST /inspect` | `{prompt,input,context}` |
 | Stats | `GET /stats` | — |
 | Approve Near-Match | `POST /approve` | `{request,candidate}` |
 | Reject Near-Match | `POST /reject` | `{request,candidate}` |
@@ -37,6 +37,11 @@ The credential test calls `GET /healthz`.
 
 Route `status: miss` to your planner and then Record. Route `review` to a human
 or policy step; never auto-approve. `blocked`/`failed` should stop the workflow.
+
+Each input item produces one linked output item; payload expressions are
+evaluated per item. Inspect never executes a recipe and returns
+`{record: <stored record or null>}`. Inspection requires the updated HTTP bridge;
+older bridges return 404, not a fallback to execution.
 
 ## Test
 
@@ -48,6 +53,7 @@ The tests mock `this.helpers.httpRequest`; they do not run n8n itself.
 
 ## Limits
 
-No retries, batching, rollback, or exactly-once behavior. The bridge must be
+No automatic retries, rollback, or exactly-once behavior. Items execute
+sequentially; if a later item fails, earlier effects remain. The bridge must be
 reachable from the n8n container; see `examples/n8n/README.md` for the
 container-to-host networking caveat.

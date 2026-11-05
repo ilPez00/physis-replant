@@ -9,6 +9,7 @@ function context(operation, payload, response = { status: 'miss' }) {
   const calls = [];
   return {
     calls,
+    getInputData: () => [{ json: {} }],
     getCredentials: async () => ({ baseUrl: 'http://replant:8799/', token: 'secret' }),
     getNodeParameter: (name) => ({ operation, payload })[name],
     helpers: {
@@ -63,4 +64,33 @@ test('credential declares the header and health test', () => {
   assert.equal(credential.name, 'replantApi');
   assert.equal(credential.authenticate.properties.headers.Authorization, '=Bearer {{$credentials.token}}');
   assert.equal(credential.test.request.url, '/healthz');
+});
+
+test('inspect uses /inspect and wraps missing records as valid n8n JSON', async () => {
+  const ctx = context('inspect', '{"prompt":"absent"}', null);
+  const output = await new Replant().execute.call(ctx);
+  assert.equal(ctx.calls[0].url, 'http://replant:8799/inspect');
+  assert.deepEqual(output[0][0].json, { record: null });
+});
+
+test('every input item evaluates its own parameters and preserves item linking', async () => {
+  const ctx = context('run', '{}');
+  const requests = [{ prompt: 'first' }, { prompt: 'second' }, { prompt: 'third' }];
+  ctx.getInputData = () => requests.map((json) => ({ json }));
+  ctx.getNodeParameter = (name, index) => name === 'operation' ? 'run' : requests[index];
+  ctx.helpers.httpRequest = async (options) => {
+    ctx.calls.push(options);
+    return { status: 'succeeded', prompt: options.body.prompt };
+  };
+  const [items] = await new Replant().execute.call(ctx);
+  assert.deepEqual(ctx.calls.map((call) => call.body), requests);
+  assert.deepEqual(items.map((item) => item.json.prompt), requests.map((r) => r.prompt));
+  assert.deepEqual(items.map((item) => item.pairedItem), [{ item: 0 }, { item: 1 }, { item: 2 }]);
+});
+
+test('empty batches perform no requests', async () => {
+  const ctx = context('run', '{}');
+  ctx.getInputData = () => [];
+  assert.deepEqual(await new Replant().execute.call(ctx), [[]]);
+  assert.equal(ctx.calls.length, 0);
 });

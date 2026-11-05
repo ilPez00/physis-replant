@@ -71,7 +71,7 @@ class ReplantClient:
         return self._request("POST", "/record", record)
 
     def inspect(self, request: Dict[str, Any]) -> Any:
-        return self._request("POST", "/run", request)
+        return self._request("POST", "/inspect", request)
 
     def stats(self) -> Dict[str, Any]:
         return self._request("GET", "/stats")

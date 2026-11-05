@@ -311,7 +311,7 @@ impl Memo {
         };
         if let Some(reason) = reason {
             let candidates = if entry.is_none() {
-                self.review_candidates(request, &key)?
+                self.review_candidates(request, &key, &history, &policy)?
             } else {
                 Vec::new()
             };
@@ -413,6 +413,10 @@ impl Memo {
             .store
             .record(&input.candidate)?
             .context("unknown candidate record")?;
+        ensure!(
+            self.verified_candidate(&candidate, &history, &policy)?,
+            "candidate is not a current, indexed, verified recipe"
+        );
         ensure!(
             candidate.request.context == input.request.context,
             "candidate context does not match; refusing cross-context approval"
@@ -584,7 +588,53 @@ impl Memo {
         Ok(stats)
     }
 
-    fn review_candidates(&self, request: &Request, key: &str) -> Result<Vec<ReviewCandidate>> {
+    fn verified_candidate(
+        &self,
+        record: &LearnedRecord,
+        history: &[Receipt],
+        policy: &str,
+    ) -> Result<bool> {
+        if record.schema != 1
+            || record.policy_hash != policy
+            || record.engine_version != env!("CARGO_PKG_VERSION")
+            || record.strategy != STRATEGY
+            || digest(&record.recipe)? != record.recipe_hash
+        {
+            return Ok(false);
+        }
+        let key = request_key(&record.request)?;
+        if !self
+            .store
+            .entry(&key)?
+            .is_some_and(|entry| entry.id == record.id)
+        {
+            return Ok(false);
+        }
+        let latest = history.iter().rev().find(|r| {
+            r.key == key && !matches!(r.operation, Operation::Lookup | Operation::Reject)
+        });
+        Ok(latest.is_some_and(|r| {
+            r.status == Status::Succeeded
+                && r.operation != Operation::Undo
+                && (!matches!(r.operation, Operation::Record | Operation::Approve)
+                    || r.id == record.id)
+        }) && history.iter().any(|r| {
+            r.id == record.id
+                && r.key == key
+                && matches!(r.operation, Operation::Record | Operation::Approve)
+                && r.status == Status::Succeeded
+                && r.recipe_hash.as_deref() == Some(record.recipe_hash.as_str())
+                && r.policy_hash == record.policy_hash
+        }))
+    }
+
+    fn review_candidates(
+        &self,
+        request: &Request,
+        key: &str,
+        history: &[Receipt],
+        policy: &str,
+    ) -> Result<Vec<ReviewCandidate>> {
         let rejected: BTreeSet<String> = self
             .store
             .rejections()?
@@ -595,9 +645,8 @@ impl Memo {
         let mut candidates = Vec::new();
         for record in self.store.records()? {
             if record.request.context != request.context
-                || record.engine_version != env!("CARGO_PKG_VERSION")
-                || record.strategy != STRATEGY
                 || rejected.contains(&record.id)
+                || !self.verified_candidate(&record, history, policy)?
             {
                 continue;
             }

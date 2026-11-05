@@ -21,6 +21,9 @@ if (receipt.status === 'miss') {
 Methods: `health`, `run`, `record`, `inspect`, `stats`, `approve`, `reject`,
 `undo`. Errors throw `ReplantError` with `.status` and `.receipt`.
 
+`inspect(request)` calls read-only `POST /inspect`, returning the stored record
+or `null`. Requires the updated bridge; never falls back to `/run`.
+
 Node 18+ (uses global `fetch`; override with `options.fetchImpl`).
 
 ## Test

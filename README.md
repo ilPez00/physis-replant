@@ -133,7 +133,7 @@ Not a sandbox: tools run as the current user, and registry authorization is not 
 | Interface | Use it for |
 |---|---|
 | CLI | `run`, `record`, `approve`, `reject`, `undo`, `show`, `history`, `stats` |
-| HTTP bridge (`replant serve`) | n8n or any language; bearer auth, `/run`, `/record`, `/approve`, `/reject`, `/undo`, `/stats` |
+| HTTP bridge (`replant serve`) | n8n or any language; bearer auth, `/run`, `/record`, `/inspect` (read-only), `/approve`, `/reject`, `/undo`, `/stats` |
 | **MCP server** (`replant mcp`) | any MCP agent; 7 tools, stdio JSON-RPC |
 | **n8n community node** | `n8n-nodes-replant/`, native operations + credential |
 | **Python SDK** | `sdk/python/replant_client.py`, stdlib only |

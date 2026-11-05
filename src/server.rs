@@ -142,7 +142,7 @@ fn dispatch(memo: &Mutex<Memo>, token: &str, request: HttpRequest) -> (u16, Valu
     }
     if !matches!(
         request.path.as_str(),
-        "/run" | "/record" | "/approve" | "/reject" | "/undo" | "/stats"
+        "/run" | "/record" | "/inspect" | "/approve" | "/reject" | "/undo" | "/stats"
     ) {
         return (404, json!({"status":"failed","reason":"unknown path"}));
     }
@@ -169,12 +169,18 @@ fn dispatch(memo: &Mutex<Memo>, token: &str, request: HttpRequest) -> (u16, Valu
             )
         }
     };
-    if request.path == "/stats" {
-        return match memo.stats() {
-            Ok(stats) => (
-                200,
-                serde_json::to_value(stats).unwrap_or_else(|_| json!({"status":"failed"})),
-            ),
+    if matches!(request.path.as_str(), "/stats" | "/inspect") {
+        let result = if request.path == "/stats" {
+            memo.stats()
+                .and_then(|stats| Ok(serde_json::to_value(stats)?))
+        } else {
+            serde_json::from_slice::<Request>(&request.body)
+                .map_err(anyhow::Error::from)
+                .and_then(|request| memo.inspect(&request))
+                .and_then(|record| Ok(serde_json::to_value(record)?))
+        };
+        return match result {
+            Ok(value) => (200, value),
             Err(error) => (
                 500,
                 json!({"status":"failed","reason":format!("{error:#}")}),
@@ -272,7 +278,6 @@ mod tests {
     use super::*;
     use crate::workflow::{ToolKind, ToolRegistry, ToolSpec};
     use serde_json::json;
-    use std::io::Write as _;
 
     fn call(addr: SocketAddr, raw: &str) -> (u16, Value) {
         let mut stream = TcpStream::connect(addr).unwrap();
@@ -366,6 +371,31 @@ mod tests {
             (200, "replay")
         );
         assert_eq!(body["provider_calls"], 0);
+
+        let counter_before = std::fs::read(dir.path().join("counter")).unwrap();
+        let journal_before = std::fs::read(dir.path().join("state/journal.jsonl")).unwrap();
+        let inspect = |body: &str, authorization: &str| {
+            format!(
+            "POST /inspect HTTP/1.1\r\nHost: x\r\n{authorization}Content-Length: {}\r\n\r\n{body}", body.len()
+        )
+        };
+        assert_eq!(call(addr, &inspect(request, "")).0, 401);
+        let auth = "Authorization: Bearer 0123456789abcdef\r\n";
+        let (status, stored) = call(addr, &inspect(request, auth));
+        assert_eq!(status, 200);
+        assert_eq!(stored["request"]["prompt"], "increment");
+        assert!(stored.get("recipe").is_some());
+        let (status, missing) = call(addr, &inspect(r#"{"prompt":"absent"}"#, auth));
+        assert_eq!(status, 200);
+        assert!(missing.is_null());
+        assert_eq!(
+            std::fs::read(dir.path().join("counter")).unwrap(),
+            counter_before
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("state/journal.jsonl")).unwrap(),
+            journal_before
+        );
     }
 
     #[test]

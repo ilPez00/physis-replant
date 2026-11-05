@@ -200,3 +200,113 @@ fn mcp_stdio_lists_tools_and_routes_a_run() {
     drop(stdin);
     child.wait().unwrap();
 }
+
+#[test]
+fn unsafe_candidates_cannot_be_proposed_or_approved() {
+    for mode in [
+        "failed",
+        "unindexed",
+        "drift",
+        "engine",
+        "undone",
+        "superseded",
+        "failed-replay",
+        "interrupted",
+        "tampered",
+        "new-unindexed",
+    ] {
+        let f = Fixture::new();
+        if mode == "failed" {
+            fs::write(f.dir.path().join("fail"), "fail").unwrap();
+        }
+        let (_, learned) = f.call("record", &record("candidate-v1", "increment once", true));
+        assert_eq!(
+            learned["status"],
+            if mode == "failed" {
+                "failed"
+            } else {
+                "succeeded"
+            }
+        );
+        let id = learned["id"].as_str().unwrap();
+        let state = f.dir.path().join("state");
+        match mode {
+            "failed" => fs::remove_file(f.dir.path().join("fail")).unwrap(),
+            "unindexed" => fs::remove_file(
+                state
+                    .join("entries")
+                    .join(format!("{}.json", learned["key"].as_str().unwrap())),
+            )
+            .unwrap(),
+            "drift" => {
+                let script = f.dir.path().join("tools.py");
+                fs::write(
+                    &script,
+                    format!("{}\n# changed", fs::read_to_string(&script).unwrap()),
+                )
+                .unwrap();
+            }
+            "engine" | "tampered" => {
+                let path = state.join("records").join(format!("{id}.json"));
+                let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                if mode == "engine" {
+                    stored["engine_version"] = json!("old");
+                } else {
+                    stored["recipe"]["steps"][0]["input"] = json!({"amount":2});
+                }
+                fs::write(path, serde_json::to_vec(&stored).unwrap()).unwrap();
+            }
+            "undone" => assert_eq!(f.call("undo", &json!({"id":id})).1["status"], "succeeded"),
+            "superseded" => assert_eq!(
+                f.call("record", &record("candidate-v1", "increment once", true))
+                    .1["status"],
+                "succeeded"
+            ),
+            "new-unindexed" => {
+                assert_eq!(
+                    f.call("record", &record("candidate-v1", "increment once", true))
+                        .1["status"],
+                    "succeeded"
+                );
+                let path = state
+                    .join("entries")
+                    .join(format!("{}.json", learned["key"].as_str().unwrap()));
+                fs::write(path, serde_json::to_vec(id).unwrap()).unwrap();
+            }
+            "failed-replay" => {
+                fs::write(f.dir.path().join("fail"), "fail").unwrap();
+                assert_eq!(
+                    f.call("run", &request("candidate-v1", "increment once")).1["status"],
+                    "failed"
+                );
+                fs::remove_file(f.dir.path().join("fail")).unwrap();
+            }
+            "interrupted" => {
+                let path = state.join("journal.jsonl");
+                let journal = fs::read_to_string(&path).unwrap();
+                let rows: Vec<_> = journal.lines().collect();
+                fs::write(path, format!("{}\n", rows[..rows.len() - 1].join("\n"))).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = f.counter();
+        let near = request("candidate-v1", "increment once ");
+        let (_, review) = f.call("run", &near);
+        assert!(
+            review
+                .get("candidates")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .all(|c| c["id"] != id),
+            "{mode}: {review}"
+        );
+        let (out, approved) = f.call("approve", &json!({"request":near,"candidate":id}));
+        assert!(!out.status.success(), "{mode}: {approved}");
+        assert_eq!(
+            f.counter(),
+            before,
+            "{mode}: unsafe approval executed an action"
+        );
+    }
+}

@@ -3,7 +3,7 @@
 const OPERATIONS = {
   run: { method: 'POST', path: '/run' },
   record: { method: 'POST', path: '/record' },
-  inspect: { method: 'POST', path: '/run' },
+  inspect: { method: 'POST', path: '/inspect' },
   stats: { method: 'GET', path: '/stats' },
   approve: { method: 'POST', path: '/approve' },
   reject: { method: 'POST', path: '/reject' },
@@ -53,33 +53,43 @@ class Replant {
 
   async execute() {
     const credentials = await this.getCredentials('replantApi');
-    const operation = this.getNodeParameter('operation', 0, 'run');
-    const spec = OPERATIONS[operation];
-    if (!spec) {
-      throw new Error(`Unknown Replant operation: ${operation}`);
-    }
     const baseUrl = String(credentials.baseUrl || '').replace(/\/+$/, '');
     if (!baseUrl) {
       throw new Error('Replant Base URL is required');
     }
-    let payload;
-    const raw = this.getNodeParameter('payload', 0, '{}');
-    try {
-      payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    } catch (error) {
-      throw new Error(`Replant payload is not valid JSON: ${error.message}`);
+    const items = this.getInputData();
+    const output = [];
+    for (let index = 0; index < items.length; index++) {
+      const operation = this.getNodeParameter('operation', index, 'run');
+      const spec = OPERATIONS[operation];
+      if (!spec) {
+        throw new Error(`Unknown Replant operation: ${operation}`);
+      }
+      let payload;
+      if (spec.method !== 'GET') {
+        const raw = this.getNodeParameter('payload', index, '{}');
+        try {
+          payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch (error) {
+          throw new Error(`Replant payload is not valid JSON: ${error.message}`);
+        }
+      }
+      const response = await this.helpers.httpRequest({
+        method: spec.method,
+        url: `${baseUrl}${spec.path}`,
+        headers: {
+          Authorization: `Bearer ${credentials.token || ''}`,
+          'Content-Type': 'application/json',
+        },
+        body: payload,
+        json: true,
+      });
+      output.push({
+        json: operation === 'inspect' ? { record: response } : response,
+        pairedItem: { item: index },
+      });
     }
-    const response = await this.helpers.httpRequest({
-      method: spec.method,
-      url: `${baseUrl}${spec.path}`,
-      headers: {
-        Authorization: `Bearer ${credentials.token || ''}`,
-        'Content-Type': 'application/json',
-      },
-      body: spec.method === 'GET' ? undefined : payload,
-      json: true,
-    });
-    return [[{ json: response }]];
+    return [output];
   }
 }
 

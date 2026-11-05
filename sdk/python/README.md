@@ -19,6 +19,9 @@ elif receipt["status"] == "succeeded":
 Methods: `health`, `run`, `record`, `inspect`, `stats`, `approve`, `reject`,
 `undo`. Errors raise `ReplantError` with `.status` and `.receipt`.
 
+`inspect(request)` calls read-only `POST /inspect`, returning the stored record
+or `None`. Requires the updated bridge; never falls back to `/run`.
+
 ## Adapters
 
 `sdk/python/adapters/` contains optional shims for LangChain (`langchain_core`),
