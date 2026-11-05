@@ -89,6 +89,15 @@ echo '{"prompt":"increment once","input":{"amount":1},"context":{"workflow":"dem
 
 Full request/record shapes and the n8n adapter: [`examples/n8n/README.md`](examples/n8n/README.md).
 
+## Scan an automation before proposing replay
+
+The [read-only audit scanner](docs/automation-audit.md) accepts n8n exports,
+one authorized n8n API workflow, or explicit public prospect pages. It writes
+JSON/Markdown evidence and real Replant scan/check receipts without executing
+customer workflows. Static candidates are not verified replay eligibility;
+missing usage stays unknown and customer savings remain unmeasured.
+See [potential collaborators and public contact routes](docs/prospects-2026-11-05.md).
+
 ## Measured inside a real n8n loop
 
 **n8n 2.46.5**, Loop Over Items (batch size 1), local
