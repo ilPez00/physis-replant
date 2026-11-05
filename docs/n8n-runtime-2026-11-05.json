@@ -1,0 +1,57 @@
+{
+  "date": "2026-11-05",
+  "status": "passed",
+  "replant_code_revision": "b1827d496ef4f92276f23752e83c83ef0ba37139",
+  "replant_version": "0.3.0",
+  "n8n_version": "2.46.5",
+  "execution_mode": "real n8n CLI workflows, isolated SQLite database",
+  "loop_node": "n8n-nodes-base.splitInBatches v3, batchSize=1",
+  "model_node": "n8n-nodes-base.httpRequest v4.2",
+  "model": "gemma4-e2b-heretic-Q4_K_M",
+  "task": "increment the counter once and verify it",
+  "iterations_per_arm": 100,
+  "retries_enabled": false,
+  "tool_timeout_ms": 2000,
+  "baseline": {
+    "llm_node_invocations": 100,
+    "responses_with_usage": 100,
+    "prompt_tokens": 7500,
+    "completion_tokens": 37700,
+    "total_tokens": 45200,
+    "records": 100,
+    "replays": 0,
+    "observed_actions": 100,
+    "observed_successful_checks": 100,
+    "execution_wall_s": 518.962
+  },
+  "replant": {
+    "llm_node_invocations": 1,
+    "responses_with_usage": 1,
+    "prompt_tokens": 75,
+    "completion_tokens": 377,
+    "total_tokens": 452,
+    "records": 1,
+    "replays": 99,
+    "observed_actions": 100,
+    "observed_successful_checks": 100,
+    "execution_wall_s": 16.339
+  },
+  "usage_histogram": [
+    {"prompt_tokens": 75, "completion_tokens": 377, "total_tokens": 452, "baseline_responses": 100, "replant_responses": 1}
+  ],
+  "cumulative_checkpoints": [
+    {"iterations": 1, "baseline_tokens": 452, "replant_tokens": 452, "tokens_saved": 0, "percent_saved": 0.0},
+    {"iterations": 5, "baseline_tokens": 2260, "replant_tokens": 452, "tokens_saved": 1808, "percent_saved": 80.0},
+    {"iterations": 10, "baseline_tokens": 4520, "replant_tokens": 452, "tokens_saved": 4068, "percent_saved": 90.0},
+    {"iterations": 25, "baseline_tokens": 11300, "replant_tokens": 452, "tokens_saved": 10848, "percent_saved": 96.0},
+    {"iterations": 50, "baseline_tokens": 22600, "replant_tokens": 452, "tokens_saved": 22148, "percent_saved": 98.0},
+    {"iterations": 100, "baseline_tokens": 45200, "replant_tokens": 452, "tokens_saved": 44748, "percent_saved": 99.0}
+  ],
+  "scope_limits": [
+    "Exact identical repeated request, input and context within each arm",
+    "Model calls occur inside n8n; no external Python planning",
+    "Local model tokens, not paid invoices; reported totals include prompt-cache usage",
+    "CLI-mode runtime, not the Docker/webhook deployment or custom community-node package",
+    "Cumulative checkpoints from one execution per arm, not independent repeated trials"
+  ]
+}

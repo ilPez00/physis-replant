@@ -4,7 +4,7 @@
 
 Record a verified tool recipe once. Re-run the **real actions and checks** forever after — no inference, no cached side-effect responses. Local, auditable, and deliberately narrow.
 
-**Measured on 100 repeated runs: 99% fewer LLM tokens (100 calls → 1, 16,212 → 162 tokens).** All 100 real actions and 100 independent checks still ran.
+**Measured inside n8n: 100 iterations, 99% fewer LLM tokens (100 calls vs 1; 45,200 vs 452 tokens).** Both arms executed 100 real actions and 100 independent checks.
 
 [![CI](https://github.com/ilPez00/physis-replant/actions/workflows/ci.yml/badge.svg)](https://github.com/ilPez00/physis-replant/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/rust-1.89%2B-orange)
@@ -89,20 +89,46 @@ echo '{"prompt":"increment once","input":{"amount":1},"context":{"workflow":"dem
 
 Full request/record shapes and the n8n adapter: [`examples/n8n/README.md`](examples/n8n/README.md).
 
-## Measured, not asserted
+## Measured inside a real n8n loop
 
-`scripts/llm_cost_benchmark.py` runs the same task twice: baseline calls the LLM on every iteration; replant calls it once and replays. Both arms execute the real action and independent check every time.
+**n8n 2.46.5**, Loop Over Items (batch size 1), local
+`gemma4-e2b-heretic-Q4_K_M`. The **HTTP Request model node runs inside n8n**.
+Python only imports/starts the workflows and checks their results; it does not
+call the model in this test. Both arms start without a matching recipe.
 
-Two real runs, real API token usage, real side effects and checks in both arms:
+Task: increment a real file counter once, then independently verify the change.
+Baseline plans every iteration. Replant looks up the exact request first,
+plans/records on the first miss, then re-executes the verified recipe.
 
-| iterations | model | LLM calls | total tokens | wall time | tokens saved |
-|---:|---|---:|---:|---:|---:|
-| 100 | `nvidia/nemotron-3-ultra-550b-a55b:free` (OpenRouter) | 100 → 1 | 16,212 → 162 | 373.3 s → 22.6 s | **99.0%** |
-| 5 | local `gemma4-e2b` gateway | 5 → 1 | 2,260 → 452 | 18.4 s → 4.5 s | 80.0% |
+| Completed iterations per arm | LLM calls: baseline / Replant | Baseline tokens | Replant tokens | Tokens saved | Saved |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1 / 1 | 452 | 452 | 0 | 0.0% |
+| 5 | 5 / 1 | 2,260 | 452 | 1,808 | **80.0%** |
+| 10 | 10 / 1 | 4,520 | 452 | 4,068 | **90.0%** |
+| 25 | 25 / 1 | 11,300 | 452 | 10,848 | **96.0%** |
+| 50 | 50 / 1 | 22,600 | 452 | 22,148 | **98.0%** |
+| **100** | **100 / 1** | **45,200** | **452** | **44,748** | **99.0%** |
 
-All 100 baseline iterations recorded/executed; the replant arm recorded once and replayed 99 times. Both arms performed every real increment and passed every check. For N identical runs the call count is N versus 1, so token reduction approaches `1 - 1/N`. The first run still pays; any real change forces a new call.
+Rows are measured cumulative checkpoints from the same two 100-item executions,
+not extrapolations or separate trials. **Both arms completed 100 real actions
+and 100 successful independent checks.** Replant recorded once and replayed 99
+times; no actions were replaced by cached-success responses.
 
-See [`docs/verification-2026-11-04.md`](docs/verification-2026-11-04.md) for the claim matrix, failure cases, restart persistence, and the LLM benchmark.
+Totals come from every model response's required usage telemetry, including
+reported prompt-cache tokens. Retries were disabled. This measures tokens and
+avoided inference calls, **not paid invoice savings**. It proves exact-repeat
+reuse, not arbitrary changing tasks. A fixed workflow written by hand can skip
+the LLM entirely; Replant addresses recipes initially supplied by an agent.
+
+Reproduce with [`scripts/n8n_runtime_benchmark.py`](scripts/n8n_runtime_benchmark.py)
+and the [n8n instructions](examples/n8n/README.md#actual-n8n-loop-with-a-live-model).
+See the [runtime report](docs/n8n-runtime-2026-11-05.md) and
+[machine-readable results](docs/n8n-runtime-2026-11-05.json).
+
+Earlier OpenRouter measurement: 16,212 vs 162 tokens over 100 iterations using
+`nvidia/nemotron-3-ultra-550b-a55b:free`. That older test called the planner from
+Python, not from an n8n model node; see
+[`docs/verification-2026-11-04.md`](docs/verification-2026-11-04.md).
 
 ## Not another cache
 

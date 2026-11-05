@@ -113,6 +113,48 @@ On the running n8n 2.46.5 container (host `pansa`, 2026-11-04):
 Both calls changed the real counter and the check passed. This proves the
 n8n-compatible loop; it does **not** measure a live provider or token saving.
 
+### Actual n8n loop with a live model
+
+[`scripts/n8n_runtime_benchmark.py`](../../scripts/n8n_runtime_benchmark.py)
+imports and executes two real workflows using the installed n8n CLI. Unlike the
+original webhook benchmark, the model request is an **HTTP Request node inside
+n8n**, not an external Python planner.
+
+Both workflows use **Loop Over Items**, batch size 1:
+
+```text
+Baseline: item -> LLM Plan -> Record (action + check) -> next item
+Replant:  item -> Lookup -> succeeded ----------------> next item
+                         -> miss -> LLM Plan -> Record -> next item
+```
+
+Any other lookup status stops the test. The benchmark rejects missing token
+telemetry, incomplete loops, unexpected operation sequences, extra/missing
+actions, and missing/failed checks. HTTP node retries are disabled.
+
+With a working n8n CLI, an unauthenticated local OpenAI-compatible model endpoint,
+and a built release binary:
+
+```sh
+REPLANT_LLM_URL=http://YOUR_GATEWAY/v1/chat/completions \
+REPLANT_LLM_MODEL=YOUR_MODEL \
+python3 scripts/n8n_runtime_benchmark.py \
+  --host "$(tailscale ip -4)" \
+  --iterations 100 \
+  --directory "/tmp/opencode/replant-n8n-$(date +%s)"
+```
+
+`--host` names one private IPv4 interface reachable by n8n. The directory must
+not exist. Workflows, execution logs, isolated databases and `report.json` stay
+inside it. The temporary bridge is stopped afterward. No deployed workflow,
+store, counter or credential is reused. n8n's environment access is enabled only
+in this isolated process so HTTP nodes can read the temporary bridge token.
+
+The script requires a complete n8n installation, including its native SQLite
+binding. It adds no n8n/SQLite dependency to Replant. This is a real **CLI-mode
+n8n workflow** test; it does not test the Docker/webhook deployment or the
+community-node package.
+
 ## 6. Secret handling
 
 The template uses a placeholder. When you fill it, the bearer token lands in the
@@ -122,7 +164,8 @@ workflow to a public repo.
 
 ## 7. Limits
 
-- No live provider call by this repo; the planner is external.
+- The original webhook template has a literal placeholder planner. The CLI
+  benchmark above performs live inference inside n8n.
 - No rollback or exactly-once guarantee. A failed check can follow a completed
   action; inspect effects before re-recording.
 - One store = one bridge; the bridge serializes state with an OS lock.
