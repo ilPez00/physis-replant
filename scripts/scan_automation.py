@@ -71,10 +71,13 @@ def fetch(url, headers=None, public=False):
         connection = PublicHTTPS(p.hostname, sorted(addresses)[0])
     else:
         if p.scheme == "http":
-            # Cleartext API credentials only to an explicitly selected local/private endpoint.
-            addresses = {r[4][0] for r in socket.getaddrinfo(p.hostname, p.port or 80, type=socket.SOCK_STREAM)}
-            if not addresses or any(ipaddress.ip_address(a).is_global for a in addresses):
-                raise ValueError("public API instances require HTTPS")
+            # IP literals avoid a second DNS lookup exposing cleartext credentials.
+            try:
+                address = ipaddress.ip_address(p.hostname)
+            except ValueError:
+                raise ValueError("HTTP API requires a non-public IP literal; use HTTPS for hostnames") from None
+            if address.is_global or address.is_unspecified or address.is_multicast:
+                raise ValueError("HTTP API requires a non-public unicast IP literal")
         connection = (http.client.HTTPSConnection if p.scheme == "https" else http.client.HTTPConnection)(
             p.hostname, p.port, timeout=TIMEOUT)
     try:
@@ -86,6 +89,8 @@ def fetch(url, headers=None, public=False):
         body = response.read(MAX_BODY + 1)
         if len(body) > MAX_BODY:
             raise ValueError("source exceeds body size limit")
+        if response.length not in (None, 0):
+            raise ValueError("source ended before its declared Content-Length")
         return body, response.getheader("Content-Type", "")
     finally:
         connection.close()
@@ -144,8 +149,11 @@ def analyze_workflows(workflows, executions):
     totals = {k: 0 for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
     measured = missing = duplicates = 0
     seen = {}
+    responses, anonymous_responses = {}, set()
     for ex in executions:
-        if not isinstance(ex, dict) or not isinstance(ex.get("data", {}).get("resultData", {}).get("runData"), dict):
+        if (not isinstance(ex, dict) or not isinstance(ex.get("data"), dict)
+                or not isinstance(ex["data"].get("resultData"), dict)
+                or not isinstance(ex["data"]["resultData"].get("runData"), dict)):
             raise ValueError("unsupported execution export; require data.resultData.runData")
         signature = digest(ex)
         key = str(ex["id"]) if ex.get("id") is not None else signature
@@ -161,11 +169,25 @@ def analyze_workflows(workflows, executions):
                 raise ValueError("cannot attribute execution to a workflow")
             node_map = next(iter(maps.values()))
         for name, runs in ex["data"]["resultData"]["runData"].items():
+            if not isinstance(runs, list):
+                raise ValueError("execution node runs must be a list")
             node = node_map.get(name, {})
             is_model = model_node(node)
             is_http = node.get("type", "").endswith(".httpRequest")
+            if not runs and (is_model or name not in node_map):
+                missing += 1
             for run in runs:
-                items = [item for output in run.get("data", {}).get("main", []) for item in output or []]
+                if not isinstance(run, dict) or not isinstance(run.get("data", {}), dict):
+                    raise ValueError("execution run/data must be objects")
+                outputs = run.get("data", {}).get("main", [])
+                if not isinstance(outputs, list) or any(output is not None and not isinstance(output, list) for output in outputs):
+                    raise ValueError("execution main outputs must be arrays")
+                items = [item for output in outputs for item in output or []]
+                if any(not isinstance(item, dict) or not isinstance(item.get("json", {}), dict) for item in items):
+                    raise ValueError("execution output items/json must be objects")
+                if name not in node_map:
+                    missing += max(1, len(items))
+                    continue
                 if is_model and not items:
                     missing += 1
                 for item in items:
@@ -176,8 +198,23 @@ def analyze_workflows(workflows, executions):
                     if not is_model and not (is_http and response):
                         continue
                     usage = value.get("usage", {}) if isinstance(value, dict) else {}
-                    valid = is_http and response and all(type(usage.get(k)) is int and usage[k] >= 0 for k in totals)
+                    valid = is_http and response and isinstance(usage, dict) and all(type(usage.get(k)) is int and usage[k] >= 0 for k in totals)
                     if valid and usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]:
+                        provider = str(node.get("parameters", {}).get("url", ""))
+                        response_id, signature = value.get("id"), digest(value)
+                        if isinstance(response_id, str) and response_id:
+                            identity = (provider, response_id)
+                            if identity in responses:
+                                if responses[identity] != signature:
+                                    raise ValueError("conflicting provider response identity")
+                                continue
+                            responses[identity] = signature
+                        else:
+                            identity = (provider, signature)
+                            if identity in anonymous_responses:
+                                missing += 1  # Cannot distinguish copied output from another billable call.
+                                continue
+                            anonymous_responses.add(identity)
                         measured += 1
                         for field in totals:
                             totals[field] += usage[field]

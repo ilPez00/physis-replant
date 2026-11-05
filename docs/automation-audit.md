@@ -56,8 +56,9 @@ scope, not every historical execution or the entire account. n8n retention and
 permissions may omit older data. Redirects, auth failures, rate limits, malformed
 responses, and oversized bodies fail rather than retry silently.
 
-Use HTTPS. HTTP is allowed only for explicitly selected non-public hosts, for
-local/private operator environments; it does not encrypt credentials.
+Use HTTPS. HTTP is allowed only for explicitly selected non-public IP literals
+(for example `http://127.0.0.1:5678`), not hostnames. This avoids DNS check/use
+gaps but does not encrypt credentials. Use it only on trusted local/private networks.
 No customer API instance was used in verification: API integration was tested
 against a local HTTP fixture with a fake credential.
 
@@ -105,6 +106,10 @@ Files mode also verifies source bytes still match. These are local integrity
 checks, not a signature, third-party certification, or protection against someone
 who controls the scanner account and rewrites both evidence and checks.
 
+Known concurrency limit: finish the first scan in a new output directory before
+starting parallel callers. Cold-start ownership initialization can race and
+reject a caller; established directories serialize scans with a file lock.
+
 **A receipt attests scanner execution and checks. It does not attest customer
 workflow correctness, safe replay eligibility, customer execution, or savings.**
 `customer_savings` remains `null`, `replay_eligibility` stays `unverified`.
@@ -125,10 +130,15 @@ re-records after that inspection. It is not automatic retry or near-match approv
   responses produce partial/unknown coverage; missing usage is never zero.
 - Native LangChain/provider telemetry and other model node types are not
   comprehensively supported. Only recognized outputs contribute; reports are
-  not a complete provider invoice or universal model detector. Repeated output
-  items are not proof of separate billable calls.
+  not a complete provider invoice or universal model detector. Reliable provider
+  response ids are counted once per endpoint; conflicting reused ids fail.
+  Identical repeated responses without ids make coverage partial instead of
+  inflating totals. Repeated output items are not proof of separate billable calls.
 - Duplicate execution exports are deduplicated by execution id or content hash;
   conflicting duplicates fail. Explicit mismatched workflow ids fail.
+- Historical execution nodes absent from the supplied/current workflow make
+  telemetry partial, rather than silently disappearing from the total. Nested
+  execution containers are schema-checked; malformed arrays/objects fail.
 - Raw parameters, prompts, response content, headers, and API keys are not
   report fields. Credential-shaped labels and the active API key are scrubbed,
   but arbitrary human labels/URLs can contain personal or sensitive data.

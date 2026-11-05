@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import pathlib
@@ -71,6 +72,55 @@ class AnalysisTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             scan.analyze_workflows([workflow()], [execution(), changed])
 
+    def test_provider_response_identity_is_counted_once_across_items_and_executions(self):
+        ex = execution()
+        items = ex["data"]["resultData"]["runData"]["Model"][0]["data"]["main"][0]
+        items[0]["json"]["id"] = "chatcmpl-same-provider-response"
+        items.append(copy.deepcopy(items[0]))
+        other = copy.deepcopy(ex)
+        other["id"] = "ex2"
+        usage = scan.analyze_workflows([workflow()], [ex, other])["usage"]
+        self.assertEqual(usage["total_tokens"], 15)
+        self.assertEqual(usage["observed_model_responses"], 1)
+
+    def test_repeated_response_without_identity_is_partial_not_double_counted(self):
+        ex = execution()
+        items = ex["data"]["resultData"]["runData"]["Model"][0]["data"]["main"][0]
+        items.append(copy.deepcopy(items[0]))
+        usage = scan.analyze_workflows([workflow()], [ex])["usage"]
+        self.assertEqual(usage["status"], "partial")
+        self.assertIsNone(usage["total_tokens"])
+        self.assertEqual(usage["known_tokens"]["total_tokens"], 15)
+
+    def test_conflicting_provider_response_identity_fails(self):
+        ex = execution()
+        items = ex["data"]["resultData"]["runData"]["Model"][0]["data"]["main"][0]
+        items[0]["json"]["id"] = "chatcmpl-conflict"
+        items.append(copy.deepcopy(items[0]))
+        items[1]["json"]["usage"] = {"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16}
+        with self.assertRaises(ValueError):
+            scan.analyze_workflows([workflow()], [ex])
+
+    def test_unattributable_historical_node_marks_coverage_partial(self):
+        ex = execution()
+        runs = ex["data"]["resultData"]["runData"]
+        runs["Old Model"] = copy.deepcopy(runs["Model"])
+        usage = scan.analyze_workflows([workflow()], [ex])["usage"]
+        self.assertEqual(usage["status"], "partial")
+        self.assertIsNone(usage["total_tokens"])
+        self.assertGreater(usage["unmeasured_responses"], 0)
+
+    def test_malformed_nested_execution_data_fails(self):
+        variants = [{}, "", [None], [{"data": []}], [{"data": {"main": {}}}],
+                    [{"data": {"main": [""]}}], [{"data": {"main": [[None]]}}],
+                    [{"data": {"main": [[{"json": []}]]}}]]
+        for invalid in variants:
+            with self.subTest(invalid=invalid):
+                ex = execution()
+                ex["data"]["resultData"]["runData"]["Model"] = invalid
+                with self.assertRaises(ValueError):
+                    scan.analyze_workflows([workflow()], [ex])
+
     def test_expressions_remain_inert_and_names_are_scrubbed(self):
         wf = workflow()
         wf["nodes"][0]["parameters"] = {"command": "={{process.exit(91)}}"}
@@ -89,6 +139,7 @@ class Handler(BaseHTTPRequestHandler):
     cursor = False
     malformed = False
     echo_key = False
+    truncated = False
 
     def log_message(self, *args):
         pass
@@ -101,6 +152,7 @@ class Handler(BaseHTTPRequestHandler):
         body = b"bad json" if self.malformed else json.dumps(payload).encode()
         self.send_response(self.status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body) + (10 if self.truncated else 0)))
         self.end_headers()
         self.wfile.write(body)
 
@@ -122,6 +174,7 @@ class CollectionTests(unittest.TestCase):
     def setUp(self):
         Handler.requests.clear()
         Handler.status, Handler.cursor, Handler.malformed, Handler.echo_key = 200, False, False, False
+        Handler.truncated = False
 
     def config(self):
         return {"mode": "api", "instance": self.url, "workflow_id": "wf1", "key_env": "SCAN_TEST_KEY", "limit": 10}
@@ -152,6 +205,22 @@ class CollectionTests(unittest.TestCase):
         with patch.dict(os.environ, {"SCAN_TEST_KEY": "private-api-secret"}):
             with self.assertRaises(ValueError):
                 scan.collect(self.config())
+
+    def test_truncated_http_body_cannot_produce_an_audit(self):
+        Handler.truncated = True
+        with patch.dict(os.environ, {"SCAN_TEST_KEY": "private-api-secret"}):
+            with self.assertRaises(ValueError):
+                scan.collect(self.config())
+
+    def test_cleartext_api_hostname_is_refused_before_connection(self):
+        answer = [(2, 1, 6, "", ("127.0.0.1", 80))]
+        with patch.object(scan.socket, "getaddrinfo", return_value=answer), patch.object(scan.http.client, "HTTPConnection") as connection:
+            response = connection.return_value.getresponse.return_value
+            response.status, response.length = 200, 0
+            response.read.return_value = b"{}"
+            with self.assertRaises(ValueError):
+                scan.fetch("http://private-now-public-later.example", {"X-N8N-API-KEY": "private-api-secret"})
+            connection.assert_not_called()
 
     def test_long_echoed_credential_is_redacted_before_label_truncation(self):
         Handler.echo_key = True
@@ -299,6 +368,7 @@ class ReceiptTests(unittest.TestCase):
 
     def test_api_mode_creates_real_scan_receipt_without_persisting_key(self):
         Handler.status, Handler.cursor, Handler.malformed, Handler.echo_key = 200, False, False, True
+        Handler.truncated = False
         Handler.requests.clear()
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
