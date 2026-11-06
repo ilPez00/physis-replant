@@ -40,6 +40,7 @@ struct Options {
     tools: Option<PathBuf>,
     bind: Option<String>,
     token_file: Option<PathBuf>,
+    no_checks: bool,
 }
 
 #[derive(Deserialize)]
@@ -71,12 +72,17 @@ fn options(args: Vec<OsString>) -> Result<Options> {
     let mut tools = None;
     let mut bind = None;
     let mut token_file = None;
+    let mut no_checks = false;
     while let Some(flag) = args.next() {
         let slot = match flag.to_str() {
             Some("--store") => &mut store,
             Some("--tools") => &mut tools,
             Some("--bind") => &mut bind,
             Some("--token-file") => &mut token_file,
+            Some("--no-checks") => {
+                no_checks = true;
+                continue;
+            }
             _ => bail!(
                 "unexpected argument: {}; use --help",
                 flag.to_string_lossy()
@@ -109,6 +115,7 @@ fn options(args: Vec<OsString>) -> Result<Options> {
         tools,
         bind: bind.map(|path| path.to_string_lossy().into_owned()),
         token_file,
+        no_checks,
     })
 }
 
@@ -202,7 +209,7 @@ fn execute(args: Vec<OsString>) -> Result<(Value, bool)> {
         return Ok((json!({"status":"stopped"}), true));
     }
     let receipt = match options.command.as_str() {
-        "run" => memo.run(request.as_ref().context("missing request")?)?,
+        "run" => memo.run(request.as_ref().context("missing request")?, options.no_checks)?,
         "record" => memo.record(record.as_ref().context("missing record")?)?,
         "approve" => memo.approve(review.as_ref().context("missing review input")?)?,
         "reject" => memo.reject(review.as_ref().context("missing review input")?)?,

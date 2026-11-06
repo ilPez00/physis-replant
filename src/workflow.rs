@@ -247,7 +247,9 @@ impl Memo {
         })
     }
 
-    pub fn run(&mut self, request: &Request) -> Result<Receipt> {
+    /// `skip_checks` is diagnostic only: it skips the independent check phase
+    /// during replay. Production callers must pass `false`.
+    pub fn run(&mut self, request: &Request, skip_checks: bool) -> Result<Receipt> {
         let key = request_key(request)?;
         let _lock = self.store.lock()?;
         let history = self.store.history()?;
@@ -343,7 +345,7 @@ impl Memo {
             Some(entry.recipe_hash),
             history.len(),
         )?;
-        self.execute(receipt, &entry.recipe)
+        self.execute(receipt, &entry.recipe, skip_checks)
     }
 
     /// Record after executing independent registered checks, never confidence alone.
@@ -385,7 +387,7 @@ impl Memo {
             strategy: STRATEGY.into(),
         };
         self.store.save_record(&learned)?;
-        let receipt = self.execute(receipt, &input.recipe)?;
+        let receipt = self.execute(receipt, &input.recipe, false)?;
         if receipt.status == Status::Succeeded {
             self.store.index(&key, &learned.id)?;
         }
@@ -448,7 +450,7 @@ impl Memo {
             strategy: STRATEGY.into(),
         };
         self.store.save_record(&learned)?;
-        let receipt = self.execute(receipt, &learned.recipe)?;
+        let receipt = self.execute(receipt, &learned.recipe, false)?;
         if receipt.status == Status::Succeeded {
             self.store.index(&key, &learned.id)?;
         }
@@ -753,7 +755,7 @@ impl Memo {
         })
     }
 
-    fn execute(&self, mut receipt: Receipt, recipe: &Recipe) -> Result<Receipt> {
+    fn execute(&self, mut receipt: Receipt, recipe: &Recipe, skip_checks: bool) -> Result<Receipt> {
         // Persist intent before effects: an interrupted invocation cannot look clean.
         self.store.append(&receipt)?;
         let start = Instant::now();
@@ -763,6 +765,9 @@ impl Memo {
             ("action", &recipe.steps),
             ("check", &recipe.checks),
         ] {
+            if skip_checks && phase == "check" {
+                continue;
+            }
             for call in calls {
                 if let Err(error) = self.verify_policy(&receipt.policy_hash) {
                     receipt.reason = Some(format!("{error:#}"));

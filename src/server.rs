@@ -190,7 +190,7 @@ fn dispatch(memo: &Mutex<Memo>, token: &str, request: HttpRequest) -> (u16, Valu
     let receipt = match request.path.as_str() {
         "/run" => serde_json::from_slice::<Request>(&request.body)
             .map_err(anyhow::Error::from)
-            .and_then(|request| memo.run(&request)),
+            .and_then(|request| memo.run(&request, false)),
         "/record" => serde_json::from_slice::<RecordInput>(&request.body)
             .map_err(anyhow::Error::from)
             .and_then(|record| memo.record(&record)),

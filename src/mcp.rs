@@ -58,7 +58,7 @@ fn call(memo: &mut Memo, name: &str, arguments: &Value) -> Result<Value, String>
                     arguments.get("request").cloned().unwrap_or(Value::Null),
                 )
                 .context("invalid request")?;
-                Ok(serde_json::to_value(memo.run(&request)?)?)
+                Ok(serde_json::to_value(memo.run(&request, false)?)?)
             }
             "replant_record" => {
                 let input: RecordInput =
