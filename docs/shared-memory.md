@@ -80,6 +80,13 @@ Replant's engine version changes from 0.3 to 0.4. Old verified recipes miss due
 to engine drift and require deliberate re-recording after checking their effects;
 no safety fingerprint, journal or historical receipt is rewritten.
 
-Native Next wiring and cross-binary verification are recorded separately after
-integration. The existing n8n token benchmark remains standalone evidence, not
-a measurement of native integration or shared-memory performance.
+Native Next wiring lives on the separate `feat/native-replant-memory` integration
+branch. Its kernel/store facades and CLI/MCP call these same libraries; Next
+retains its graph/event/revision logic. `scripts/native_shared_memory_test.py`
+accepts `--replant`, `--physis` and a new disposable `--out` directory. The actual
+cross-binary proof verified seven fixture actions and seven independent checks,
+both record/replay directions, bidirectional notes and Next-produced observations,
+failure blocking, concurrent appends, drift invalidation and projection recovery.
+Inspect and sync added no actions. The existing n8n token benchmark remains
+standalone evidence, not a measurement of native integration or shared-memory
+performance. No default Next branch is merged by this implementation.

@@ -1,6 +1,8 @@
 # Native Physis/Replant integration and shared memory
 
-Status: proposed; awaiting operator approval before implementation.
+Status: approved for implementation by the operator's `implement` instruction.
+Execution plan: `docs/superpowers/plans/2026-11-05-native-physis-shared-memory.md`.
+Implementation is isolated on feature branches; default-branch integration is separate.
 
 ## Intent and approved scope
 
