@@ -63,7 +63,7 @@ pub struct ToolCall {
     pub input: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Recipe {
     pub preconditions: Vec<ToolCall>,
@@ -71,17 +71,6 @@ pub struct Recipe {
     pub checks: Vec<ToolCall>,
     /// Declared inverse of `steps`; run on failure or by explicit `undo`.
     pub undo: Vec<ToolCall>,
-}
-
-impl Default for Recipe {
-    fn default() -> Self {
-        Self {
-            preconditions: Vec::new(),
-            steps: Vec::new(),
-            checks: Vec::new(),
-            undo: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +147,9 @@ pub struct Receipt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<ReviewCandidate>,
     pub reason: Option<String>,
+    /// Projection is evidence, never execution authority. An error here does not undo effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,8 +189,9 @@ pub struct Stats {
 
 /// The store is private local state, not an authorization or multi-tenant server.
 pub struct Memo {
-    store: Store,
+    pub(crate) store: Store,
     tools: ToolRegistry,
+    pub(crate) memory: physis_memory::Memory,
 }
 
 pub(crate) fn digest<T: Serialize>(value: &T) -> Result<String> {
@@ -241,13 +234,21 @@ pub fn similarity(a: &Request, b: &Request) -> f64 {
 impl Memo {
     pub fn open(path: impl AsRef<Path>, tools: ToolRegistry) -> Result<Self> {
         runner::validate_registry(&tools)?;
+        let store = Store::open(path.as_ref())?;
+        let memory = physis_memory::Memory::new(store.memory_root());
         Ok(Self {
-            store: Store::open(path.as_ref())?,
+            store,
             tools,
+            memory,
         })
     }
 
     pub fn run(&mut self, request: &Request) -> Result<Receipt> {
+        let result = self.run_inner(request);
+        self.finish_operation(result)
+    }
+
+    fn run_inner(&mut self, request: &Request) -> Result<Receipt> {
         let key = request_key(request)?;
         let _lock = self.store.lock()?;
         let history = self.store.history()?;
@@ -348,6 +349,11 @@ impl Memo {
 
     /// Record after executing independent registered checks, never confidence alone.
     pub fn record(&mut self, input: &RecordInput) -> Result<Receipt> {
+        let result = self.record_inner(input);
+        self.finish_operation(result)
+    }
+
+    fn record_inner(&mut self, input: &RecordInput) -> Result<Receipt> {
         let key = request_key(&input.request)?;
         ensure!(
             serde_json::to_vec(input)?.len() <= MAX_JSON_BYTES,
@@ -394,6 +400,11 @@ impl Memo {
 
     /// Approve a near-match candidate: execute its recipe under this exact request.
     pub fn approve(&mut self, input: &ReviewInput) -> Result<Receipt> {
+        let result = self.approve_inner(input);
+        self.finish_operation(result)
+    }
+
+    fn approve_inner(&mut self, input: &ReviewInput) -> Result<Receipt> {
         let key = request_key(&input.request)?;
         let _lock = self.store.lock()?;
         let history = self.store.history()?;
@@ -456,6 +467,11 @@ impl Memo {
     }
 
     pub fn reject(&mut self, input: &ReviewInput) -> Result<Receipt> {
+        let result = self.reject_inner(input);
+        self.finish_operation(result)
+    }
+
+    fn reject_inner(&mut self, input: &ReviewInput) -> Result<Receipt> {
         let key = request_key(&input.request)?;
         let _lock = self.store.lock()?;
         let history = self.store.history()?;
@@ -481,6 +497,11 @@ impl Memo {
 
     /// Explicitly run a record's declared undo steps in reverse order.
     pub fn undo(&mut self, id: &str) -> Result<Receipt> {
+        let result = self.undo_inner(id);
+        self.finish_operation(result)
+    }
+
+    fn undo_inner(&mut self, id: &str) -> Result<Receipt> {
         let _lock = self.store.lock()?;
         let record = self.store.record(id)?.context("unknown record")?;
         ensure!(
@@ -750,6 +771,7 @@ impl Memo {
             calls: Vec::new(),
             candidates: Vec::new(),
             reason: None,
+            memory_warning: None,
         })
     }
 

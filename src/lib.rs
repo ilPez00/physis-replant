@@ -14,6 +14,7 @@ pub mod compile;
 pub mod deterministic;
 pub mod ids;
 pub mod mcp;
+mod memory;
 mod runner;
 pub mod server;
 mod store;
@@ -32,6 +33,9 @@ pub use deterministic::{
     AbstainEngine, CompiledRuleEngine, Rule, RuleEngine, TransitionCacheEngine,
 };
 pub use ids::stable_id;
+pub use physis_memory::{
+    Memory, MemoryNote, MemoryPage, MemoryQuery, Observation, ObservationSource,
+};
 pub use trace::state_digest;
 
 // ——————————————————————————————————————

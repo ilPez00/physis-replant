@@ -34,7 +34,7 @@ fn tool_list() -> Value {
         }),
         vec!["request", "candidate"],
     );
-    json!({"tools":[
+    let mut list = json!({"tools":[
         {"name":"replant_run","description":"Look up an exact verified recipe; re-executes actions and checks on a hit. Returns miss or review candidates on a miss.","inputSchema":schema(json!({"request":request_schema()}),vec!["request"])},
         {"name":"replant_record","description":"Execute a planner-supplied recipe with independent checks and persist it if verified.","inputSchema":schema(json!({"record":schema(json!({"request":request_schema(),"recipe":{"type":"object"},"trace":{"type":"object"}}),vec!["request","recipe","trace"])}),vec!["record"])},
         {"name":"replant_inspect","description":"Return the learned record for an exact request, or null.","inputSchema":schema(json!({"request":request_schema()}),vec!["request"])},
@@ -42,7 +42,60 @@ fn tool_list() -> Value {
         {"name":"replant_approve","description":"Execute a reviewed near-match candidate under this exact request and record it if checks pass.","inputSchema":review.clone()},
         {"name":"replant_reject","description":"Reject a near-match candidate for this request so it is not proposed again.","inputSchema":review},
         {"name":"replant_undo","description":"Run a learned record's declared undo steps in reverse order.","inputSchema":schema(json!({"id":{"type":"string","description":"64-hex record id"}}),vec!["id"])}
-    ]})
+    ]});
+    let tools = list["tools"].as_array_mut().unwrap();
+    for (name, description, properties, required) in [
+        (
+            "replant_remember",
+            "Append a redacted general note; never execution authority.",
+            json!({"subject":{"type":"string"},"text":{"type":"string"},"actor":{"type":"string"}}),
+            vec!["subject", "text"],
+        ),
+        (
+            "replant_memory_history",
+            "Read bounded general observations, exposing corruption/truncation.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "replant_memory_search",
+            "Search general observations; notes do not authorize actions.",
+            json!({"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":1000}}),
+            vec![],
+        ),
+        (
+            "replant_sync_memory",
+            "Repair missing receipt projections; never rerun actions.",
+            json!({}),
+            vec![],
+        ),
+        (
+            "replant_history",
+            "Read the authoritative receipt journal without executing actions.",
+            json!({}),
+            vec![],
+        ),
+    ] {
+        tools.push(json!({"name":name,"description":description,"inputSchema":schema(properties,required)}));
+    }
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        let read_only = matches!(
+            name,
+            "replant_inspect"
+                | "replant_stats"
+                | "replant_history"
+                | "replant_memory_history"
+                | "replant_memory_search"
+        );
+        let external = matches!(
+            name,
+            "replant_run" | "replant_record" | "replant_approve" | "replant_undo"
+        );
+        tool["annotations"] =
+            json!({"readOnlyHint":read_only,"destructiveHint":external,"openWorldHint":external});
+    }
+    list
 }
 
 fn text_result(value: &Value, is_error: bool) -> Value {
@@ -53,6 +106,11 @@ fn text_result(value: &Value, is_error: bool) -> Value {
 fn call(memo: &mut Memo, name: &str, arguments: &Value) -> Result<Value, String> {
     let mut run = || -> Result<Value> {
         match name {
+            "replant_remember" => memo.dispatch("remember", arguments.clone()),
+            "replant_memory_history" => memo.dispatch("memory-history", arguments.clone()),
+            "replant_memory_search" => memo.dispatch("memory-search", arguments.clone()),
+            "replant_sync_memory" => memo.dispatch("sync-memory", arguments.clone()),
+            "replant_history" => memo.dispatch("history", arguments.clone()),
             "replant_run" => {
                 let request: Request = serde_json::from_value(
                     arguments.get("request").cloned().unwrap_or(Value::Null),
@@ -142,7 +200,10 @@ fn handle(memo: &mut Memo, message: &Value) -> Option<Value> {
 
 /// Serve until stdin closes. Logs nothing to stdout except JSON-RPC responses.
 pub fn serve(store: &Path, tools: ToolRegistry) -> Result<()> {
-    let mut memo = Memo::open(store, tools)?;
+    serve_memo(Memo::open(store, tools)?)
+}
+
+pub fn serve_memo(mut memo: Memo) -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -195,7 +256,7 @@ mod tests {
             &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 12);
         let call = handle(&mut memo, &json!({
             "jsonrpc":"2.0","id":3,"method":"tools/call",
             "params":{"name":"replant_run","arguments":{"request":{"prompt":"never seen","input":{},"context":{}}}}
@@ -230,5 +291,33 @@ mod tests {
             &json!({"jsonrpc":"2.0","method":"notifications/initialized"})
         )
         .is_none());
+    }
+
+    #[test]
+    fn memory_tools_are_bounded_and_have_correct_permissions() {
+        let dir = TempDir::new().unwrap();
+        let mut memo = memo(&dir);
+        let note = call(
+            &mut memo,
+            "replant_remember",
+            &json!({"subject":"operator","text":"remember this","actor":"test"}),
+        )
+        .unwrap();
+        assert_eq!(note["seq"], 0);
+        assert_eq!(
+            call(&mut memo, "replant_memory_history", &json!({})).unwrap()["matched"],
+            1
+        );
+        assert!(call(&mut memo, "replant_memory_search", &json!({"limit":1001})).is_err());
+        let list = tool_list();
+        for name in ["replant_inspect", "replant_memory_history", "replant_stats"] {
+            let tool = list["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap();
+            assert_eq!(tool["annotations"]["readOnlyHint"], true, "{name}");
+        }
     }
 }

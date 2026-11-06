@@ -191,7 +191,23 @@ fn mcp_stdio_lists_tools_and_routes_a_run() {
     let init = exchange(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
     assert_eq!(init["result"]["serverInfo"]["name"], "physis-replant");
     let list = exchange(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
+    let tools = list["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 12);
+    for name in [
+        "replant_run",
+        "replant_record",
+        "replant_inspect",
+        "replant_remember",
+        "replant_memory_history",
+        "replant_memory_search",
+        "replant_sync_memory",
+        "replant_history",
+    ] {
+        assert!(
+            tools.iter().any(|tool| tool["name"] == name),
+            "missing {name}"
+        );
+    }
     let call = exchange(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
         "params":{"name":"replant_run","arguments":{"request":request("mcp-v1","increment once")}}}));
     let text = call["result"]["content"][0]["text"].as_str().unwrap();

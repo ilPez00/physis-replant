@@ -98,6 +98,14 @@ customer workflows. Static candidates are not verified replay eligibility;
 missing usage stays unknown and customer savings remain unmeasured.
 See [potential collaborators and public contact routes](docs/prospects-2026-11-05.md).
 
+## General observation memory
+
+Replant also provides bounded general notes/history/search through the shared
+`physis-memory` crate, with explicit memory-root selection. Receipt projections
+are searchable evidence, not a second execution authority; projection failures
+return the real receipt plus a warning and can be repaired without actions.
+See [shared memory and recovery](docs/shared-memory.md).
+
 ## Measured inside a real n8n loop
 
 **n8n 2.46.5**, Loop Over Items (batch size 1), local

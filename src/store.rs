@@ -61,6 +61,13 @@ fn identifier(value: &str) -> Result<()> {
 }
 
 impl Store {
+    pub(crate) fn identity(&self) -> Result<String> {
+        crate::workflow::digest(&self.root)
+    }
+    pub(crate) fn memory_root(&self) -> PathBuf {
+        self.root.join("memory")
+    }
+
     pub fn open(root: &Path) -> Result<Self> {
         private_dir(root)?;
         let root = root.canonicalize()?;

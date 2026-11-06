@@ -142,14 +142,28 @@ fn dispatch(memo: &Mutex<Memo>, token: &str, request: HttpRequest) -> (u16, Valu
     }
     if !matches!(
         request.path.as_str(),
-        "/run" | "/record" | "/inspect" | "/approve" | "/reject" | "/undo" | "/stats"
+        "/run"
+            | "/record"
+            | "/inspect"
+            | "/approve"
+            | "/reject"
+            | "/undo"
+            | "/stats"
+            | "/history"
+            | "/memory/remember"
+            | "/memory/history"
+            | "/memory/search"
+            | "/memory/sync"
     ) {
         return (404, json!({"status":"failed","reason":"unknown path"}));
     }
     if !authorized(token, request.authorization.as_deref()) {
         return (401, json!({"status":"failed","reason":"unauthorized"}));
     }
-    let expected_method = if request.path == "/stats" {
+    let expected_method = if matches!(
+        request.path.as_str(),
+        "/stats" | "/history" | "/memory/history"
+    ) {
         "GET"
     } else {
         "POST"
@@ -169,6 +183,31 @@ fn dispatch(memo: &Mutex<Memo>, token: &str, request: HttpRequest) -> (u16, Valu
             )
         }
     };
+    let memory_operation = match request.path.as_str() {
+        "/memory/remember" => Some("remember"),
+        "/memory/history" => Some("memory-history"),
+        "/memory/search" => Some("memory-search"),
+        "/memory/sync" => Some("sync-memory"),
+        "/history" => Some("history"),
+        _ => None,
+    };
+    if let Some(operation) = memory_operation {
+        let input = if request.method == "GET" {
+            Ok(json!({}))
+        } else {
+            serde_json::from_slice(&request.body)
+        };
+        return match input
+            .map_err(anyhow::Error::from)
+            .and_then(|input| memo.dispatch(operation, input))
+        {
+            Ok(value) => (200, value),
+            Err(error) => (
+                400,
+                json!({"status":"failed","reason":format!("{error:#}")}),
+            ),
+        };
+    }
     if matches!(request.path.as_str(), "/stats" | "/inspect") {
         let result = if request.path == "/stats" {
             memo.stats()
@@ -264,7 +303,7 @@ fn serve_listener(listener: TcpListener, memo: Arc<Mutex<Memo>>, token: String) 
         let counter = Arc::clone(&in_flight);
         std::thread::spawn(move || {
             let result = read_request(&mut stream)
-                .and_then(|request| Ok(dispatch(&memo, &token, request)))
+                .map(|request| dispatch(&memo, &token, request))
                 .and_then(|(status, value)| respond(&mut stream, status, &value));
             let _ = result;
             counter.fetch_sub(1, Ordering::SeqCst);
@@ -407,5 +446,47 @@ mod tests {
             token: "0123456789abcdef".into(),
         };
         assert!(serve(config, memo).is_err());
+    }
+
+    #[test]
+    fn memory_http_routes_require_auth_and_share_the_library() {
+        let (dir, tools) = fixture();
+        let memo = Mutex::new(Memo::open(dir.path().join("state"), tools).unwrap());
+        let request = |method: &str, path: &str, auth: bool, body: Value| HttpRequest {
+            method: method.into(),
+            path: path.into(),
+            authorization: auth.then(|| "Bearer 0123456789abcdef".into()),
+            body: serde_json::to_vec(&body).unwrap(),
+        };
+        assert_eq!(
+            dispatch(
+                &memo,
+                "0123456789abcdef",
+                request("GET", "/memory/history", false, json!({}))
+            )
+            .0,
+            401
+        );
+        assert_eq!(
+            dispatch(
+                &memo,
+                "0123456789abcdef",
+                request(
+                    "POST",
+                    "/memory/remember",
+                    true,
+                    json!({"subject":"shared","text":"note"})
+                )
+            )
+            .0,
+            200
+        );
+        let (status, page) = dispatch(
+            &memo,
+            "0123456789abcdef",
+            request("GET", "/memory/history", true, json!({})),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(page["matched"], 1);
     }
 }

@@ -1,7 +1,9 @@
 use anyhow::{bail, Context, Result};
 use physis_replant::mcp;
 use physis_replant::server::{serve, ServerConfig};
-use physis_replant::{Memo, RecordInput, Request, ReviewInput, Status, ToolRegistry};
+use physis_replant::{
+    Memo, MemoryNote, MemoryQuery, RecordInput, Request, ReviewInput, Status, ToolRegistry,
+};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -14,6 +16,11 @@ use std::process::ExitCode;
 const MAX_INPUT: u64 = 1024 * 1024;
 const HELP: &str =
     "replant <run|record|show|history|stats|approve|reject|undo|serve|mcp> [options]\n\
+    remember    Read {subject,text,actor?}; append a redacted general note.\n\
+    memory-history Return bounded general memory with degraded/truncated indicators.\n\
+    memory-search Read {query,limit?}; search bounded general notes/observations.\n\
+    sync-memory Repair missing receipt projections without running actions.\n\
+    --memory-root Explicit general memory root (or REPLANT_MEMORY_ROOT); default STORE/memory.\n\
     run         Read {prompt,input,context}; replay, miss, or review candidates.\n\
     record      Read {request,recipe,trace}; execute, check and learn.\n\
     show        Read request JSON; return learned record or null.\n\
@@ -40,6 +47,7 @@ struct Options {
     tools: Option<PathBuf>,
     bind: Option<String>,
     token_file: Option<PathBuf>,
+    memory_root: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +72,10 @@ fn options(args: Vec<OsString>) -> Result<Options> {
             | "undo"
             | "serve"
             | "mcp"
+            | "remember"
+            | "memory-history"
+            | "memory-search"
+            | "sync-memory"
     ) {
         bail!("unknown command: {command}; use --help");
     }
@@ -71,12 +83,14 @@ fn options(args: Vec<OsString>) -> Result<Options> {
     let mut tools = None;
     let mut bind = None;
     let mut token_file = None;
+    let mut memory_root = None;
     while let Some(flag) = args.next() {
         let slot = match flag.to_str() {
             Some("--store") => &mut store,
             Some("--tools") => &mut tools,
             Some("--bind") => &mut bind,
             Some("--token-file") => &mut token_file,
+            Some("--memory-root") => &mut memory_root,
             _ => bail!(
                 "unexpected argument: {}; use --help",
                 flag.to_string_lossy()
@@ -109,6 +123,11 @@ fn options(args: Vec<OsString>) -> Result<Options> {
         tools,
         bind: bind.map(|path| path.to_string_lossy().into_owned()),
         token_file,
+        memory_root: memory_root.or_else(|| {
+            std::env::var_os("REPLANT_MEMORY_ROOT")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        }),
     })
 }
 
@@ -153,6 +172,11 @@ fn execute(args: Vec<OsString>) -> Result<(Value, bool)> {
     }
     let options = options(args)?;
     // Validate stdin before opening or changing persistent state.
+    let memory_input = match options.command.as_str() {
+        "remember" => Some(serde_json::to_value(input::<MemoryNote>()?)?),
+        "memory-search" => Some(serde_json::to_value(input::<MemoryQuery>()?)?),
+        _ => None,
+    };
     let request: Option<Request> = if matches!(options.command.as_str(), "run" | "show") {
         Some(input()?)
     } else {
@@ -186,11 +210,23 @@ fn execute(args: Vec<OsString>) -> Result<(Value, bool)> {
         }
         None => ToolRegistry::new(),
     };
+    let mut memo = Memo::open(&options.store, tools)?;
+    if let Some(root) = options.memory_root {
+        memo = memo.with_memory_root(root);
+    }
     if options.command == "mcp" {
-        mcp::serve(&options.store, tools)?;
+        mcp::serve_memo(memo)?;
         return Ok((json!({"status":"stopped"}), true));
     }
-    let mut memo = Memo::open(&options.store, tools)?;
+    if matches!(
+        options.command.as_str(),
+        "remember" | "memory-history" | "memory-search" | "sync-memory"
+    ) {
+        return Ok((
+            memo.dispatch(&options.command, memory_input.unwrap_or_else(|| json!({})))?,
+            true,
+        ));
+    }
     if options.command == "serve" {
         let bind = options
             .bind
