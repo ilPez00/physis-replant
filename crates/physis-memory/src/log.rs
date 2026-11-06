@@ -274,10 +274,12 @@ pub fn load_observations(path: &Path) -> (Vec<Observation>, bool) {
             .collect::<Vec<_>>()
     });
     let mut out: Vec<Observation> = Vec::new();
+    let mut sequence_break = false;
     for (items, damaged) in parts {
         for item in items {
             if out.last().is_some_and(|last| item.seq <= last.seq) {
-                return (out, true);
+                // Keep parsed evidence: Next's invariant checker must still see the break.
+                sequence_break = true;
             }
             out.push(item);
         }
@@ -285,5 +287,8 @@ pub fn load_observations(path: &Path) -> (Vec<Observation>, bool) {
             return (out, true);
         }
     }
-    (out, !bytes.is_empty() && !bytes.ends_with(b"\n"))
+    (
+        out,
+        sequence_break || (!bytes.is_empty() && !bytes.ends_with(b"\n")),
+    )
 }

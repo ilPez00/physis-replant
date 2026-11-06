@@ -113,6 +113,13 @@ fn damaged_unterminated_and_duplicate_sequence_logs_refuse_append_without_data_l
         let original = std::fs::read(memory.path()).unwrap();
         let page = memory.query(&MemoryQuery::default()).unwrap();
         assert!(page.degraded, "{tail}");
+        if tail == "duplicate_sequence" {
+            assert_eq!(
+                page.observations.len(),
+                2,
+                "retain parsed rows so Next can diagnose the first sequence break"
+            );
+        }
         assert!(
             memory.append(Observation::new("note", "later")).is_err(),
             "{tail}"
