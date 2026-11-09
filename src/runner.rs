@@ -61,11 +61,11 @@ pub(crate) fn fingerprint(tools: &ToolRegistry) -> Result<String> {
             }
             let file = File::open(&canonical)?;
             ensure!(
-                file.metadata()?.is_file() && file.metadata()?.len() <= 64 << 20,
-                "tool fingerprint must be a regular file at most 64 MiB"
+                file.metadata()?.is_file() && file.metadata()?.len() <= 256 << 20,
+                "tool fingerprint must be a regular file at most 256 MiB"
             );
             let mut hash = Sha256::new();
-            let mut reader = file.take((64 << 20) + 1);
+            let mut reader = file.take((256 << 20) + 1);
             let mut buffer = [0u8; 16_384];
             let mut total = 0;
             loop {
@@ -74,7 +74,7 @@ pub(crate) fn fingerprint(tools: &ToolRegistry) -> Result<String> {
                     break;
                 }
                 total += count;
-                ensure!(total <= 64 << 20, "tool fingerprint exceeds 64 MiB");
+                ensure!(total <= 256 << 20, "tool fingerprint exceeds 256 MiB");
                 hash.update(&buffer[..count]);
             }
             fingerprints.insert(canonical, format!("{:x}", hash.finalize()));
