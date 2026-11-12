@@ -271,8 +271,8 @@ fn serve_listener(listener: TcpListener, memo: Arc<Mutex<Memo>>, token: String) 
         let counter = Arc::clone(&in_flight);
         std::thread::spawn(move || {
             let result = read_request(&mut stream)
-                 .map(|request| dispatch(&memo, &token, request))
-                 .and_then(|(status, value)| respond(&mut stream, status, &value));
+                .map(|request| dispatch(&memo, &token, request))
+                .and_then(|(status, value)| respond(&mut stream, status, &value));
             let _ = result;
             counter.fetch_sub(1, Ordering::SeqCst);
         });
