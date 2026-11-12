@@ -374,6 +374,170 @@ fn undeclared_late_phase_role_prevents_earlier_effects() {
 }
 
 #[test]
+fn bindings_preserve_types_pointers_template_and_exact_request() {
+    let f = Fixture::new("print(json.dumps({'ok':True,'input':v}))");
+    let mut r = f.record();
+    r["recipe"]["bind_inputs"] = json!(true);
+    r["request"]["input"] = json!({"days":7,"nested":{"arr":[{"enabled":true}],"object":{"x":"y"}},"a/b":{"~key":null}});
+    r["recipe"]["steps"][0]["input"] = json!({"number":{"$input":"days"},"array":{"$input":"/nested/arr"},"object":{"$input":"/nested/object"},"null":{"$input":"/a~1b/~0key"},"nested":[{"enabled":{"$input":"/nested/arr/0/enabled"}}]});
+    let expected = json!({"number":7,"array":[{"enabled":true}],"object":{"x":"y"},"null":null,"nested":[{"enabled":true}]});
+    let (out, learned) = f.call("record", &r);
+    assert!(out.status.success(), "{learned}");
+    assert_eq!(learned["calls"][0]["output"]["input"], expected);
+    let (_, stored) = f.call("show", &r["request"]);
+    assert_eq!(stored["recipe"]["steps"], r["recipe"]["steps"]);
+    let (_, replay) = f.call("run", &r["request"]);
+    assert_eq!(replay["calls"][0]["output"]["input"], expected);
+    assert_eq!(replay["recipe_hash"], learned["recipe_hash"]);
+    let mut different = r["request"].clone();
+    different["context"] = json!({"different":true});
+    assert_eq!(f.call("run", &different).1["status"], "miss");
+    let script = f.dir.path().join("tools.py");
+    fs::write(
+        &script,
+        format!("{}\n# drift", fs::read_to_string(&script).unwrap()),
+    )
+    .unwrap();
+    let (out, re) = f.call("rerecord", &json!({"id":learned["id"]}));
+    assert!(out.status.success(), "{re}");
+    assert_eq!(re["calls"][0]["output"]["input"], expected);
+    assert_eq!(re["recipe_hash"], learned["recipe_hash"]);
+}
+
+#[test]
+fn bindings_without_optin_are_literal_and_false_is_not_serialized() {
+    let f = Fixture::new("print(json.dumps({'ok':True,'input':v}))");
+    let mut r = f.record();
+    r["recipe"]["steps"][0]["input"] = json!({"$input":"missing","mixed":"literal"});
+    let (out, learned) = f.call("record", &r);
+    assert!(out.status.success(), "{learned}");
+    assert_eq!(
+        learned["calls"][0]["output"]["input"],
+        r["recipe"]["steps"][0]["input"]
+    );
+    let recipe: physis_replant::Recipe = serde_json::from_value(r["recipe"].clone()).unwrap();
+    let mut explicit = r["recipe"].clone();
+    explicit["bind_inputs"] = json!(false);
+    let explicit: physis_replant::Recipe = serde_json::from_value(explicit).unwrap();
+    assert_eq!(
+        serde_json::to_value(&recipe).unwrap(),
+        serde_json::to_value(&explicit).unwrap()
+    );
+    assert!(serde_json::to_value(recipe)
+        .unwrap()
+        .get("bind_inputs")
+        .is_none());
+}
+
+#[test]
+fn bindings_invalid_late_phases_and_oversize_refuse_before_intent_or_effects() {
+    for phase in ["preconditions", "checks", "undo"] {
+        for invalid in [
+            json!({"$input":"absent"}),
+            json!({"$input":""}),
+            json!({"$input":7}),
+            json!({"$input":"days","extra":1}),
+            json!({"$input":"/bad~2escape"}),
+            json!({"$input":"/trailing~"}),
+            json!({"$input":"/missing/0"}),
+        ] {
+            let f=Fixture::new("pathlib.Path(__file__).with_suffix('.effect').write_text('effect');print('{\"ok\":true}')");
+            let mut tools = f.tools();
+            tools["act"].as_object_mut().unwrap().remove("kind");
+            tools["act"]["kinds"] = json!(["action", "undo"]);
+            f.set_tools(&tools);
+            let mut r = f.record();
+            r["request"]["input"]["bad~2escape"] = json!("must-not-resolve");
+            r["request"]["input"]["trailing~"] = json!("must-not-resolve");
+            r["recipe"]["bind_inputs"] = json!(true);
+            r["recipe"][phase] =
+                json!([{"tool":if phase=="undo"{"act"}else{"check"},"input":invalid}]);
+            let (out, refused) = f.call("record", &r);
+            assert!(!out.status.success(), "{phase}/{invalid}: {refused}");
+            assert!(!f.dir.path().join("tools.effect").exists());
+            assert!(!f.dir.path().join("state/journal.jsonl").exists());
+        }
+    }
+    let f = Fixture::new(
+        "pathlib.Path(__file__).with_suffix('.effect').write_text('effect');print('{\"ok\":true}')",
+    );
+    let mut r = f.record();
+    r["recipe"]["bind_inputs"] = json!(true);
+    r["request"]["input"]["large"] = json!("x".repeat(65536));
+    r["recipe"]["checks"][0]["input"] = json!({"$input":"large"});
+    let (out, refused) = f.call("record", &r);
+    assert!(!out.status.success(), "{refused}");
+    assert!(!f.dir.path().join("tools.effect").exists());
+}
+
+#[test]
+fn bindings_approved_input_compensation_and_explicit_undo_use_correct_request() {
+    let f = Fixture::new("print(json.dumps({'ok':True,'input':v}))");
+    let mut tools = f.tools();
+    tools["act"].as_object_mut().unwrap().remove("kind");
+    tools["act"]["kinds"] = json!(["action", "undo"]);
+    f.set_tools(&tools);
+    let mut r = f.record();
+    r["request"]["prompt"] =
+        json!("execute exact task with independent verified trusted checks for daily workflow");
+    r["recipe"]["bind_inputs"] = json!(true);
+    r["recipe"]["steps"][0]["input"] = json!({"$input":"days"});
+    r["recipe"]["undo"] = json!([{"tool":"act","input":{"days":{"$input":"days"}}}]);
+    let (out, learned) = f.call("record", &r);
+    assert!(out.status.success(), "{learned}");
+    let mut near = r["request"].clone();
+    near["input"]["days"] = json!(8);
+    let (out, approved) = f.call(
+        "approve",
+        &json!({"request":near,"candidate":learned["id"]}),
+    );
+    assert!(out.status.success(), "{approved}");
+    assert_eq!(approved["calls"][0]["output"]["input"], 8);
+    let (out, undone) = f.call("undo", &json!({"id":approved["id"]}));
+    assert!(out.status.success(), "{undone}");
+    assert_eq!(undone["calls"][0]["output"]["input"]["days"], 8);
+    tools["check"]["args"] = json!([
+        "-c",
+        "import json,sys;json.load(sys.stdin);print('{\"ok\":false}')"
+    ]);
+    f.set_tools(&tools);
+    r["request"]["input"]["days"] = json!(9);
+    let (_, failed) = f.call("record", &r);
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["calls"][2]["kind"], "undo");
+    assert_eq!(failed["calls"][2]["output"]["input"]["days"], 9);
+}
+
+#[test]
+fn bindings_selected_data_is_not_reinterpreted_and_all_phases_bind() {
+    let f = Fixture::new("print(json.dumps({'ok':True,'input':v}))");
+    let mut tools = f.tools();
+    for name in ["act", "check"] {
+        tools[name].as_object_mut().unwrap().remove("kind");
+        tools[name]["kinds"] = json!(["action", "check", "undo"]);
+        tools[name]["args"] = json!([f.dir.path().join("tools.py")]);
+    }
+    f.set_tools(&tools);
+    let mut r = f.record();
+    r["recipe"]["bind_inputs"] = json!(true);
+    r["request"]["input"]["data"] = json!({"$input":"not-a-second-binding"});
+    for phase in ["preconditions", "steps", "checks", "undo"] {
+        r["recipe"][phase] = json!([{"tool":if phase=="steps"||phase=="undo"{"act"}else{"check"},"input":{"$input":"data"}}]);
+    }
+    let (out, learned) = f.call("record", &r);
+    assert!(out.status.success(), "{learned}");
+    for call in learned["calls"].as_array().unwrap() {
+        assert_eq!(call["output"]["input"], r["request"]["input"]["data"]);
+    }
+    let (out, undo) = f.call("undo", &json!({"id":learned["id"]}));
+    assert!(out.status.success(), "{undo}");
+    assert_eq!(
+        undo["calls"][0]["output"]["input"],
+        r["request"]["input"]["data"]
+    );
+}
+
+#[test]
 fn operator_timeout_boundaries_and_default() {
     for timeout in [120001, 1800000, 0, 1800001] {
         let f = Fixture::new("print('{\"ok\":true}')");

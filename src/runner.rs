@@ -89,6 +89,7 @@ pub(crate) fn fingerprint(tools: &ToolRegistry) -> Result<String> {
     digest(&(
         env!("CARGO_PKG_VERSION"),
         include_str!("workflow.rs"),
+        include_str!("bindings.rs"),
         include_str!("runner.rs"),
         include_str!("store.rs"),
         tools,

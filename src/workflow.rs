@@ -137,6 +137,9 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Recipe {
+    /// Opt in to singleton $input selectors. False stays absent for legacy hashes.
+    #[serde(skip_serializing_if = "is_false")]
+    pub bind_inputs: bool,
     pub preconditions: Vec<ToolCall>,
     pub steps: Vec<ToolCall>,
     pub checks: Vec<ToolCall>,
@@ -144,9 +147,14 @@ pub struct Recipe {
     pub undo: Vec<ToolCall>,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl Default for Recipe {
     fn default() -> Self {
         Self {
+            bind_inputs: false,
             preconditions: Vec::new(),
             steps: Vec::new(),
             checks: Vec::new(),
@@ -435,7 +443,7 @@ impl Memo {
             return Ok(receipt);
         }
         let entry = entry.context("missing verified record")?;
-        self.validate_recipe(&entry.recipe)?;
+        let resolved = self.prepare(&entry.recipe, request)?;
         let receipt = self.receipt(
             &key,
             Operation::Replay,
@@ -444,7 +452,7 @@ impl Memo {
             Some(entry.recipe_hash),
             history.len(),
         )?;
-        self.execute(receipt, &entry.recipe)
+        self.execute(receipt, &resolved)
     }
 
     /// Record after executing independent registered checks, never confidence alone.
@@ -461,7 +469,7 @@ impl Memo {
                 .is_some_and(|object| !object.is_empty()),
             "trace must be a nonempty JSON object"
         );
-        self.validate_recipe(&input.recipe)?;
+        let resolved = self.prepare(&input.recipe, &input.request)?;
         let _lock = self.store.lock()?;
         let history = self.store.history()?;
         let policy = runner::fingerprint(&self.tools)?;
@@ -486,7 +494,7 @@ impl Memo {
             strategy: STRATEGY.into(),
         };
         self.store.save_record(&learned)?;
-        let receipt = self.execute(receipt, &input.recipe)?;
+        let receipt = self.execute(receipt, &resolved)?;
         if receipt.status == Status::Succeeded {
             self.store.index(&key, &learned.id)?;
         }
@@ -503,7 +511,7 @@ impl Memo {
             self.verified_source(&source, &history)?,
             "source is not a current, indexed, successfully verified record"
         );
-        self.validate_recipe(&source.recipe)?;
+        let resolved = self.prepare(&source.recipe, &source.request)?;
         let key = request_key(&source.request)?;
         let policy = runner::fingerprint(&self.tools)?;
         let receipt = self.receipt(
@@ -522,7 +530,7 @@ impl Memo {
             ..source
         };
         self.store.save_record(&learned)?;
-        let receipt = self.execute(receipt, &learned.recipe)?;
+        let receipt = self.execute(receipt, &resolved)?;
         if receipt.status == Status::Succeeded {
             self.store.index(&key, &learned.id)?;
         }
@@ -563,7 +571,7 @@ impl Memo {
             score >= REVIEW_THRESHOLD,
             "candidate similarity {score:.3} is below {REVIEW_THRESHOLD:.2}"
         );
-        self.validate_recipe(&candidate.recipe)?;
+        let resolved = self.prepare(&candidate.recipe, &input.request)?;
         let recipe_hash = digest(&candidate.recipe)?;
         let receipt = self.receipt(
             &key,
@@ -585,7 +593,7 @@ impl Memo {
             strategy: STRATEGY.into(),
         };
         self.store.save_record(&learned)?;
-        let receipt = self.execute(receipt, &learned.recipe)?;
+        let receipt = self.execute(receipt, &resolved)?;
         if receipt.status == Status::Succeeded {
             self.store.index(&key, &learned.id)?;
         }
@@ -624,7 +632,7 @@ impl Memo {
             !record.recipe.undo.is_empty(),
             "recipe declares no undo steps"
         );
-        self.validate_undo(&record.recipe)?;
+        let resolved = self.prepare(&record.recipe, &record.request)?;
         let key = request_key(&record.request)?;
         let history = self.store.history()?;
         let policy = runner::fingerprint(&self.tools)?;
@@ -639,7 +647,7 @@ impl Memo {
         self.store.append(&receipt)?;
         let start = Instant::now();
         let mut receipt = receipt;
-        for call in record.recipe.undo.iter().rev() {
+        for call in resolved.undo.iter().rev() {
             if let Err(error) = self.verify_policy(&receipt.policy_hash) {
                 receipt.reason = Some(format!("{error:#}"));
                 break;
@@ -861,23 +869,10 @@ impl Memo {
         Ok(())
     }
 
-    fn validate_undo(&self, recipe: &Recipe) -> Result<()> {
-        for call in &recipe.undo {
-            let spec = self
-                .tools
-                .get(&call.tool)
-                .with_context(|| format!("unknown undo tool: {}", call.tool))?;
-            ensure!(
-                spec.allows(ToolKind::Undo),
-                "tool {} is not registered as Undo",
-                call.tool
-            );
-            ensure!(
-                serde_json::to_vec(&call.input)?.len() <= runner::MAX_TOOL_BYTES,
-                "undo input exceeds 64 KiB"
-            );
-        }
-        Ok(())
+    fn prepare(&self, recipe: &Recipe, request: &Request) -> Result<Recipe> {
+        let resolved = crate::bindings::resolve(recipe, request)?;
+        self.validate_recipe(&resolved)?;
+        Ok(resolved)
     }
 
     fn receipt(

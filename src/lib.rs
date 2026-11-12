@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+mod bindings;
 pub mod cascade;
 pub mod compile;
 pub mod deterministic;
