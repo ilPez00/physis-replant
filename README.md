@@ -163,7 +163,7 @@ Record/replay is a crowded space for **debugging** (agentrr, tracefork, hetu, ag
 - **Bounded.** 1 MiB requests, 32 calls per recipe, 64 KiB tool input/stdout verification bounds, operator-selected deadlines up to 30 minutes per tool, and process-group cleanup. Failed receipts preserve bounded stdout and a stderr tail; truncation is explicit and never verifies success.
 - **No rollback, no exactly-once.** A check can fail after an action ran. Inspect effects before re-recording.
 
-Not a sandbox: tools run as the current user, and registry authorization is not a permission system. See the limits in [`README`](README.md#safety-and-limits) and the n8n notes.
+Not a sandbox: tools run as the current user, and registry authorization is not a permission system. See the [safety model](#safety-model) and the n8n notes.
 
 ## Interfaces
 
@@ -202,7 +202,7 @@ tools. No client automatically re-records a stale or failed operation.
 
 Recipes may declare `undo` steps (registered as `kind: "undo"`). They run in
 reverse when an action succeeds and a later check fails, and can be invoked
-explicitly with `undo <record-id>`. Compensation is operator-declared, not a
+explicitly with `undo`, reading `{"id":"<record-id>"}` on stdin. Compensation is operator-declared, not a
 transaction: a failed undo is reported, and replay stays blocked until a new
 record.
 
@@ -225,8 +225,9 @@ in this repository. That is the open-core split.
 
 ## Status
 
-v0.3.0, experimental. Tested on Linux: 54 Rust tests plus Node/Python SDK and
-node tests; real CLI/subprocess effects, restart persistence, concurrent writers,
+v0.3.0, experimental, with the ops extensions above unreleased. See
+[`docs/verification-2026-11-12.md`](docs/verification-2026-11-12.md) for current
+gate counts and limits. Covered on Linux: real CLI/subprocess effects, restart persistence, concurrent writers,
 corruption, timeouts, near-match approval/rejection, compensation, MCP stdio, and
 a live n8n 2.46 record→replay loop. Not yet published to crates.io or npm.
 

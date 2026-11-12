@@ -112,12 +112,14 @@ for recovery. Never route every stale/failed/timeout response to re-recording.
 
 ### Limit avoidable invalidation
 
-Tool fingerprints include declared `fingerprint_files`. Put each tool's
-implementation in its own file and declare any shared library/config files
-explicitly. Editing a monolithic file referenced by every tool invalidates all
-those recipes. This is a scope-control tip, not permission to omit real
-implementation dependencies. The engine currently fingerprints the whole
-registry; registry changes can still invalidate otherwise unrelated recipes.
+Tool fingerprints cover the entire operator registry and every declared
+implementation dependency. Put each tool in a separate file for audit clarity,
+but do not expect this to isolate invalidation: changing any fingerprinted file
+or registry entry currently invalidates recipes using that registry, including
+recipes that do not call the changed tool. Declare real shared libraries/config
+files; never omit dependencies to keep a stale hit. Independent workflows can
+use separate operator-managed registries and stores when they need isolated
+invalidation. Per-recipe dependency fingerprinting is not implemented here.
 
 ## 4. Register one executable for several roles
 
@@ -192,6 +194,11 @@ requires the entire exact request/input/context. A changed input may produce a
 near-match proposal but never automatic execution. Explicit approval resolves
 against that newly approved request, not the old candidate's values. Failure
 compensation and explicit undo use the corresponding recorded request input.
+Explicit undo resolves and authorizes every undo call before recovery starts;
+it does not require removed forward-action/check tools that will not execute.
+Binding expansion shares a 64 KiB encoded-JSON budget per call, including keys,
+escaping and container punctuation. Values are charged before copying, and the
+32-call recipe limit is checked before expansion, not after allocation.
 
 ## Compatibility and source callers
 

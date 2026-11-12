@@ -21,6 +21,14 @@
   `docs/ops-recipes.md`); legacy registry/recipe JSON remains supported.
 
 ### Fixed
+- Input-binding preflight budgets JSON bytes incrementally, before copying
+  selected values, and rejects excessive call counts before expansion. Repeated
+  selectors cannot allocate an oversized resolved tree before being refused.
+- MCP executable stdout stays strictly JSON-RPC through EOF; setup failures go
+  to stderr rather than emitting a non-protocol CLI object. Acceptance now rejects
+  extra, duplicate, missing or non-JSON-RPC frames instead of filtering them out.
+- Explicit undo still works after original action/check tools are removed from
+  the registry, while preflighting every current undo role and bound input.
 - Failed tool receipts retain bounded stdout, a stderr tail, parsed failure JSON
   where available, and actual exit codes. Truncation never becomes verification.
 - HTTP/SDK/n8n inspection is read-only via `POST /inspect`; missing records

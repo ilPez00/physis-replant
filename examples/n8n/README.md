@@ -33,8 +33,11 @@ replant serve \
 - `--bind` must name one interface. `0.0.0.0`/`::` is refused.
 - Token file mode `0600`, at least 16 characters.
 - Store must be private (`0700`); it holds requests, traces and receipts.
-- Routes: `GET /healthz` (no auth); `POST /run`, `POST /record` (bearer token).
-- Status: `200` succeeded/miss, `409` blocked, `422` failed, `401` bad token.
+- Routes: `GET /healthz` (no auth); `POST /run`, `POST /record`,
+  `POST /rerecord`, `POST /inspect`, `POST /approve`, `POST /reject`,
+  `POST /undo`, `GET /stats` (bearer token).
+- Status: `200` succeeded/miss/stale/review/rejected, `409` blocked,
+  `422` failed, `401` bad token.
 - No TLS. Keep the bind narrow; the tunnel adds HTTPS.
 
 Persistent user unit: `~/.config/systemd/user/replant-bridge.service`
@@ -98,6 +101,13 @@ Webhook → POST /run
   execute actions in the AI branch; `record` executes them.
 - Replay executes the action and the independent check again. It does not
   return a cached side-effect response.
+- `stale` means the exact request has a stored recipe but its implementation
+  fingerprint changed. Stop for review; `POST /rerecord` with `{id}` is an
+  explicit authorization to repeat effects, not a fallback branch.
+- For long jobs, configure the HTTP node's timeout above the complete recipe
+  duration. Registry tool deadlines can be explicitly set up to 30 minutes;
+  caller timeout does not prove server-side cancellation. See
+  [ops recipes](../../docs/ops-recipes.md) for role sets and request bindings.
 - `409` (blocked) and `422` (failed) stop the HTTP Request node by default.
   Inspect effects before recording again.
 
