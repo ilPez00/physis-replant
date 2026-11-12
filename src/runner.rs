@@ -19,6 +19,10 @@ pub(crate) fn validate_registry(tools: &ToolRegistry) -> Result<()> {
     ensure!(tools.len() <= 128, "registry exceeds 128 tools");
     for (name, spec) in tools {
         ensure!(
+            spec.valid_roles(),
+            "declare exactly one valid nonempty unique role set"
+        );
+        ensure!(
             !name.is_empty()
                 && name.len() <= 64
                 && name
@@ -287,7 +291,11 @@ pub(crate) fn execute(name: &str, spec: &ToolSpec, input: &Value, phase: &str) -
     let start = Instant::now();
     let mut outcome = ToolOutcome {
         tool: name.into(),
-        kind: spec.kind,
+        kind: match phase {
+            "action" => crate::workflow::ToolKind::Action,
+            "undo" => crate::workflow::ToolKind::Undo,
+            _ => crate::workflow::ToolKind::Check,
+        },
         phase: phase.into(),
         ok: false,
         exit_code: None,

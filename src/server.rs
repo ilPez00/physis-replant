@@ -301,11 +301,12 @@ mod tests {
         let script = dir.path().join("tools.py");
         std::fs::write(&script, "import json,sys,pathlib\nr=pathlib.Path(sys.argv[2])\nif sys.argv[1]=='check':\n print(json.dumps({'ok':True}))\nelse:\n c=r/'counter'\n n=int(c.read_text())+1 if c.exists() else 1\n c.write_text(str(n)); print(json.dumps({'ok':True,'n':n}))\n").unwrap();
         let spec = |kind: &str| ToolSpec {
-            kind: if kind == "action" {
+            kind: Some(if kind == "action" {
                 ToolKind::Action
             } else {
                 ToolKind::Check
-            },
+            }),
+            kinds: Vec::new(),
             program: "/usr/bin/python3".into(),
             args: vec![
                 script.to_string_lossy().into(),

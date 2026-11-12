@@ -39,10 +39,13 @@ fn default_timeout() -> u64 {
     30_000
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ToolSpec {
-    pub kind: ToolKind,
+    /// Legacy single-role declaration. Exactly one of kind/kinds is required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ToolKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<ToolKind>,
     pub program: PathBuf,
     #[serde(default)]
     pub args: Vec<String>,
@@ -51,6 +54,74 @@ pub struct ToolSpec {
     pub fingerprint_files: Vec<PathBuf>,
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+}
+
+impl ToolSpec {
+    pub(crate) fn valid_roles(&self) -> bool {
+        match self.kind {
+            Some(_) => self.kinds.is_empty(),
+            None => {
+                !self.kinds.is_empty()
+                    && self
+                        .kinds
+                        .iter()
+                        .enumerate()
+                        .all(|(i, kind)| !self.kinds[..i].contains(kind))
+            }
+        }
+    }
+
+    pub(crate) fn allows(&self, kind: ToolKind) -> bool {
+        self.valid_roles() && (self.kind == Some(kind) || self.kinds.contains(&kind))
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        // Deserialize a present field as T, not Option<T>: explicit null is invalid.
+        fn present<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(
+            d: D,
+        ) -> std::result::Result<Option<T>, D::Error> {
+            T::deserialize(d).map(Some)
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(default, deserialize_with = "present")]
+            kind: Option<ToolKind>,
+            #[serde(default, deserialize_with = "present")]
+            kinds: Option<Vec<ToolKind>>,
+            program: PathBuf,
+            #[serde(default)]
+            args: Vec<String>,
+            #[serde(default)]
+            fingerprint_files: Vec<PathBuf>,
+            #[serde(default = "default_timeout")]
+            timeout_ms: u64,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.kind.is_some() == wire.kinds.is_some() {
+            return Err(serde::de::Error::custom(
+                "declare exactly one of kind or kinds",
+            ));
+        }
+        let spec = Self {
+            kind: wire.kind,
+            kinds: wire.kinds.unwrap_or_default(),
+            program: wire.program,
+            args: wire.args,
+            fingerprint_files: wire.fingerprint_files,
+            timeout_ms: wire.timeout_ms,
+        };
+        if !spec.valid_roles() {
+            return Err(serde::de::Error::custom(
+                "kinds must be nonempty and unique",
+            ));
+        }
+        Ok(spec)
+    }
 }
 
 pub type ToolRegistry = BTreeMap<String, ToolSpec>;
@@ -777,7 +848,7 @@ impl Memo {
                     .get(&call.tool)
                     .with_context(|| format!("unknown tool: {}", call.tool))?;
                 ensure!(
-                    spec.kind == kind,
+                    spec.allows(kind),
                     "tool {} is not registered as {kind:?}",
                     call.tool
                 );
@@ -797,7 +868,7 @@ impl Memo {
                 .get(&call.tool)
                 .with_context(|| format!("unknown undo tool: {}", call.tool))?;
             ensure!(
-                spec.kind == ToolKind::Undo,
+                spec.allows(ToolKind::Undo),
                 "tool {} is not registered as Undo",
                 call.tool
             );

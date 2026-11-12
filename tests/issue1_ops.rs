@@ -318,6 +318,62 @@ fn rerecord_http_and_mcp_projections_exercise_real_processes() {
 }
 
 #[test]
+fn explicit_role_sets_allow_only_declared_phases_and_report_actual_role() {
+    let f = Fixture::new("print('{\"ok\":true}')");
+    let mut tools = f.tools();
+    tools["act"].as_object_mut().unwrap().remove("kind");
+    tools["act"]["kinds"] = json!(["action", "undo"]);
+    f.set_tools(&tools);
+    let mut input = f.record();
+    input["recipe"]["undo"] = json!([{"tool":"act","input":{}}]);
+    input["recipe"]["preconditions"] = json!([{"tool":"check"}]);
+    let (out, r) = f.call("record", &input);
+    assert!(out.status.success(), "{r}");
+    assert_eq!(r["calls"][0]["kind"], "check");
+    assert_eq!(r["calls"][1]["kind"], "action");
+    let (out, undo) = f.call("undo", &json!({"id":r["id"]}));
+    assert!(out.status.success(), "{undo}");
+    assert_eq!(undo["calls"][0]["kind"], "undo");
+}
+
+#[test]
+fn registry_role_shapes_are_fail_closed_and_legacy_json_is_accepted() {
+    for roles in [
+        json!({}),
+        json!({"kinds":[]}),
+        json!({"kind":"action","kinds":["action"]}),
+        json!({"kind":"action","kinds":[]}),
+        json!({"kinds":["action","action"]}),
+        json!({"kinds":["unknown"]}),
+        json!({"kind":null,"kinds":["action"]}),
+    ] {
+        let f = Fixture::new("print('{\"ok\":true}')");
+        let mut tools = f.tools();
+        let spec = tools["act"].as_object_mut().unwrap();
+        spec.remove("kind");
+        spec.extend(roles.as_object().unwrap().clone());
+        f.set_tools(&tools);
+        let (out, r) = f.call("record", &f.record());
+        assert!(!out.status.success(), "{roles}: {r}");
+        assert!(r.get("calls").is_none());
+    }
+    let f = Fixture::new("print('{\"ok\":true}')");
+    assert!(f.call("record", &f.record()).0.status.success());
+}
+
+#[test]
+fn undeclared_late_phase_role_prevents_earlier_effects() {
+    for phase in ["preconditions", "checks", "undo"] {
+        let f=Fixture::new("pathlib.Path(__file__).with_suffix('.effect').write_text('effect');print('{\"ok\":true}')");
+        let mut record = f.record();
+        record["recipe"][phase] = json!([{"tool":"act"}]);
+        let (out, r) = f.call("record", &record);
+        assert!(!out.status.success(), "{phase}: {r}");
+        assert!(!f.dir.path().join("tools.effect").exists());
+    }
+}
+
+#[test]
 fn operator_timeout_boundaries_and_default() {
     for timeout in [120001, 1800000, 0, 1800001] {
         let f = Fixture::new("print('{\"ok\":true}')");
