@@ -88,6 +88,8 @@ echo '{"prompt":"increment once","input":{"amount":1},"context":{"workflow":"dem
 ```
 
 Full request/record shapes and the n8n adapter: [`examples/n8n/README.md`](examples/n8n/README.md).
+Long-running tools, failed-process diagnostics, stale recipe recovery, multi-role
+registries and opt-in input bindings: [`docs/ops-recipes.md`](docs/ops-recipes.md).
 
 ## Scan an automation before proposing replay
 
@@ -156,9 +158,9 @@ Record/replay is a crowded space for **debugging** (agentrr, tracefork, hetu, ag
 
 - **Operator-owned tools.** A model chooses only a registered name and JSON input. Executable and argv are fixed by the operator.
 - **Independent checks.** A recipe with no check is rejected. Checks must inspect real state, not trust the planner.
-- **Fail closed.** Failed/interrupted runs block replay until an explicit re-record. Corrupt state is an error, not a reset.
+- **Fail closed.** Failed/interrupted runs block replay until effects are inspected and a fresh `record` is explicitly authorized. `rerecord` is only for an indexed, previously verified recipe with a clean execution history. Corrupt state is an error, not a reset.
 - **Exact invalidation.** Request, context, tool/registry/engine fingerprints are part of the match.
-- **Bounded.** 1 MiB requests, 32 calls per recipe, 64 KiB per tool I/O, per-tool timeouts, process-group cleanup.
+- **Bounded.** 1 MiB requests, 32 calls per recipe, 64 KiB tool input/stdout verification bounds, operator-selected deadlines up to 30 minutes per tool, and process-group cleanup. Failed receipts preserve bounded stdout and a stderr tail; truncation is explicit and never verifies success.
 - **No rollback, no exactly-once.** A check can fail after an action ran. Inspect effects before re-recording.
 
 Not a sandbox: tools run as the current user, and registry authorization is not a permission system. See the limits in [`README`](README.md#safety-and-limits) and the n8n notes.
@@ -167,9 +169,9 @@ Not a sandbox: tools run as the current user, and registry authorization is not 
 
 | Interface | Use it for |
 |---|---|
-| CLI | `run`, `record`, `approve`, `reject`, `undo`, `show`, `history`, `stats` |
-| HTTP bridge (`replant serve`) | n8n or any language; bearer auth, `/run`, `/record`, `/inspect` (read-only), `/approve`, `/reject`, `/undo`, `/stats` |
-| **MCP server** (`replant mcp`) | any MCP agent; 7 tools, stdio JSON-RPC |
+| CLI | `run`, `record`, `rerecord`, `approve`, `reject`, `undo`, `show`, `history`, `stats` |
+| HTTP bridge (`replant serve`) | n8n or any language; bearer auth, `/run`, `/record`, `/rerecord`, `/inspect` (read-only), `/approve`, `/reject`, `/undo`, `/stats` |
+| **MCP server** (`replant mcp`) | any MCP agent; 8 tools, stdio JSON-RPC |
 | **n8n community node** | `n8n-nodes-replant/`, native operations + credential |
 | **Python SDK** | `sdk/python/replant_client.py`, stdlib only |
 | **TypeScript SDK** | `sdk/typescript/`, JS + `.d.ts`, no build step |
@@ -188,6 +190,15 @@ three **near matches** (same context, token similarity ≥ 0.80) with
 `status: review`. Nothing executes until a human or policy calls `approve`; a
 `reject` suppresses that candidate for that request. Approve re-executes the
 candidate recipe under the new request and only learns it if the checks pass.
+For recipes opting in with `bind_inputs: true`, declared `$input` bindings use
+that newly approved request. Without the opt-in, existing call inputs remain
+literal. A changed input or context never becomes an automatic replay.
+
+An exact request whose recorded implementation fingerprint changed returns
+`status: stale` and the stored recipe/id without executing anything. After
+reviewing the change and authorizing repeated effects, call `rerecord` with
+`{"id":"<record-id>"}` to execute and independently check it under current
+tools. No client automatically re-records a stale or failed operation.
 
 Recipes may declare `undo` steps (registered as `kind: "undo"`). They run in
 reverse when an action succeeds and a later check fails, and can be invoked

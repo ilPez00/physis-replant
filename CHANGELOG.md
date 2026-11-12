@@ -2,7 +2,27 @@
 
 ## Unreleased
 
+### Added
+- Explicit `rerecord` in the library, CLI, HTTP bridge, MCP, SDKs and n8n node:
+  re-execute a current indexed verified recipe with current tools and checks.
+- Operator-owned `timeout_ms` values up to 1,800,000 ms (30 minutes), retaining
+  the 30-second default, bounded I/O and process-group cleanup.
+- Registry `kinds` role sets as an alternative to legacy `kind`, with explicit
+  per-phase authorization and no implicit action permission.
+- Opt-in recipe `bind_inputs: true` and typed `$input` key/JSON Pointer bindings
+  across actions, preconditions, checks and undo; complete preflight before effects.
+- n8n Request Timeout setting for explicitly authorized long recipes.
+
+### Changed
+- Exact fingerprint drift returns `stale` with the stored recipe/id, not an
+  ordinary `miss`. This does not execute tools or automatically retry.
+- Stats include a `stale` lookup count; successful re-records count as verified records.
+- Rust callers constructing public structs must supply the new fields (see
+  `docs/ops-recipes.md`); legacy registry/recipe JSON remains supported.
+
 ### Fixed
+- Failed tool receipts retain bounded stdout, a stderr tail, parsed failure JSON
+  where available, and actual exit codes. Truncation never becomes verification.
 - HTTP/SDK/n8n inspection is read-only via `POST /inspect`; missing records
   return null (n8n wraps the result as `{record: ...}`).
 - n8n processes every input item with its own payload and preserves item links.

@@ -136,6 +136,7 @@ pub struct ToolCall {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct Recipe {
     /// Opt in to singleton $input selectors. False stays absent for legacy hashes.
     #[serde(skip_serializing_if = "is_false")]
@@ -149,18 +150,6 @@ pub struct Recipe {
 
 fn is_false(value: &bool) -> bool {
     !*value
-}
-
-impl Default for Recipe {
-    fn default() -> Self {
-        Self {
-            bind_inputs: false,
-            preconditions: Vec::new(),
-            steps: Vec::new(),
-            checks: Vec::new(),
-            undo: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
