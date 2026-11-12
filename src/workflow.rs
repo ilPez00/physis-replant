@@ -13,6 +13,7 @@ use crate::{runner, store::Store};
 
 pub const STRATEGY: &str = "exact-request-verified-tools-v1";
 pub const MAX_JSON_BYTES: usize = 1 << 20;
+pub(crate) const MAX_RECIPE_CALLS: usize = 32;
 /// Near-match proposals are opt-in: never auto-replayed, always reviewed.
 pub const REVIEW_THRESHOLD: f64 = 0.80;
 pub const MAX_REVIEW_CANDIDATES: usize = 3;
@@ -39,10 +40,13 @@ fn default_timeout() -> u64 {
     30_000
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ToolSpec {
-    pub kind: ToolKind,
+    /// Legacy single-role declaration. Exactly one of kind/kinds is required.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ToolKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<ToolKind>,
     pub program: PathBuf,
     #[serde(default)]
     pub args: Vec<String>,
@@ -51,6 +55,74 @@ pub struct ToolSpec {
     pub fingerprint_files: Vec<PathBuf>,
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+}
+
+impl ToolSpec {
+    pub(crate) fn valid_roles(&self) -> bool {
+        match self.kind {
+            Some(_) => self.kinds.is_empty(),
+            None => {
+                !self.kinds.is_empty()
+                    && self
+                        .kinds
+                        .iter()
+                        .enumerate()
+                        .all(|(i, kind)| !self.kinds[..i].contains(kind))
+            }
+        }
+    }
+
+    pub(crate) fn allows(&self, kind: ToolKind) -> bool {
+        self.valid_roles() && (self.kind == Some(kind) || self.kinds.contains(&kind))
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        // Deserialize a present field as T, not Option<T>: explicit null is invalid.
+        fn present<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(
+            d: D,
+        ) -> std::result::Result<Option<T>, D::Error> {
+            T::deserialize(d).map(Some)
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(default, deserialize_with = "present")]
+            kind: Option<ToolKind>,
+            #[serde(default, deserialize_with = "present")]
+            kinds: Option<Vec<ToolKind>>,
+            program: PathBuf,
+            #[serde(default)]
+            args: Vec<String>,
+            #[serde(default)]
+            fingerprint_files: Vec<PathBuf>,
+            #[serde(default = "default_timeout")]
+            timeout_ms: u64,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.kind.is_some() == wire.kinds.is_some() {
+            return Err(serde::de::Error::custom(
+                "declare exactly one of kind or kinds",
+            ));
+        }
+        let spec = Self {
+            kind: wire.kind,
+            kinds: wire.kinds.unwrap_or_default(),
+            program: wire.program,
+            args: wire.args,
+            fingerprint_files: wire.fingerprint_files,
+            timeout_ms: wire.timeout_ms,
+        };
+        if !spec.valid_roles() {
+            return Err(serde::de::Error::custom(
+                "kinds must be nonempty and unique",
+            ));
+        }
+        Ok(spec)
+    }
 }
 
 pub type ToolRegistry = BTreeMap<String, ToolSpec>;
@@ -65,7 +137,11 @@ pub struct ToolCall {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct Recipe {
+    /// Opt in to singleton $input selectors. False stays absent for legacy hashes.
+    #[serde(skip_serializing_if = "is_false")]
+    pub bind_inputs: bool,
     pub preconditions: Vec<ToolCall>,
     pub steps: Vec<ToolCall>,
     pub checks: Vec<ToolCall>,
@@ -73,15 +149,8 @@ pub struct Recipe {
     pub undo: Vec<ToolCall>,
 }
 
-impl Default for Recipe {
-    fn default() -> Self {
-        Self {
-            preconditions: Vec::new(),
-            steps: Vec::new(),
-            checks: Vec::new(),
-            undo: Vec::new(),
-        }
-    }
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +172,7 @@ pub struct ReviewInput {
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     Record,
+    Rerecord,
     Replay,
     Lookup,
     Approve,
@@ -117,6 +187,7 @@ pub enum Status {
     Succeeded,
     Failed,
     Miss,
+    Stale,
     Blocked,
     Review,
     Rejected,
@@ -132,6 +203,14 @@ pub struct ToolOutcome {
     pub output: Option<Value>,
     pub error: Option<String>,
     pub elapsed_us: u128,
+    #[serde(default)]
+    pub stdout: String,
+    #[serde(default)]
+    pub stderr: String,
+    #[serde(default)]
+    pub stdout_truncated: bool,
+    #[serde(default)]
+    pub stderr_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,6 +218,18 @@ pub struct ReviewCandidate {
     pub id: String,
     pub similarity: f64,
     pub request: Request,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaleRecord {
+    pub id: String,
+    pub recipe: Recipe,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RerecordInput {
+    pub id: String,
 }
 
 /// One append-only memorizer decision; Started and terminal rows share an id.
@@ -157,6 +248,8 @@ pub struct Receipt {
     pub calls: Vec<ToolOutcome>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<ReviewCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_record: Option<StaleRecord>,
     pub reason: Option<String>,
 }
 
@@ -186,6 +279,8 @@ pub struct Stats {
     pub verified_replays: u64,
     pub failures: u64,
     pub misses: u64,
+    #[serde(default)]
+    pub stale: u64,
     pub reviews: u64,
     pub rejected: u64,
     pub undos: u64,
@@ -283,26 +378,24 @@ impl Memo {
             );
             ensure!(entry.schema == 1, "unsupported record schema");
             if last_execution.is_some_and(|r| {
-                matches!(r.operation, Operation::Record | Operation::Approve) && r.id != entry.id
+                matches!(
+                    r.operation,
+                    Operation::Record | Operation::Approve | Operation::Rerecord
+                ) && r.id != entry.id
             }) {
                 bail!(
                     "latest verified record was not indexed; inspect state before recording again"
                 );
             }
+            ensure!(
+                self.verified_source(entry, &history)?,
+                "record lacks a current index and successful original verification receipt"
+            );
             if entry.policy_hash != policy
                 || entry.engine_version != env!("CARGO_PKG_VERSION")
                 || entry.strategy != STRATEGY
             {
                 Some("tool implementation, registry or engine changed")
-            } else if !history.iter().any(|r| {
-                r.id == entry.id
-                    && r.key == key
-                    && matches!(r.operation, Operation::Record | Operation::Approve)
-                    && r.status == Status::Succeeded
-                    && r.recipe_hash.as_deref() == Some(entry.recipe_hash.as_str())
-                    && r.policy_hash == entry.policy_hash
-            }) {
-                bail!("record lacks its successful verification receipt");
             } else {
                 None
             }
@@ -315,7 +408,9 @@ impl Memo {
             } else {
                 Vec::new()
             };
-            let (status, reason) = if candidates.is_empty() {
+            let (status, reason) = if entry.is_some() {
+                (Status::Stale, reason)
+            } else if candidates.is_empty() {
                 (Status::Miss, reason)
             } else {
                 (
@@ -328,13 +423,17 @@ impl Memo {
             let receipt = Receipt {
                 reason: Some(reason.into()),
                 candidates,
+                stale_record: entry.as_ref().map(|entry| StaleRecord {
+                    id: entry.id.clone(),
+                    recipe: entry.recipe.clone(),
+                }),
                 ..receipt
             };
             self.store.append(&receipt)?;
             return Ok(receipt);
         }
         let entry = entry.context("missing verified record")?;
-        self.validate_recipe(&entry.recipe)?;
+        let resolved = self.prepare(&entry.recipe, request)?;
         let receipt = self.receipt(
             &key,
             Operation::Replay,
@@ -343,7 +442,7 @@ impl Memo {
             Some(entry.recipe_hash),
             history.len(),
         )?;
-        self.execute(receipt, &entry.recipe)
+        self.execute(receipt, &resolved)
     }
 
     /// Record after executing independent registered checks, never confidence alone.
@@ -360,7 +459,7 @@ impl Memo {
                 .is_some_and(|object| !object.is_empty()),
             "trace must be a nonempty JSON object"
         );
-        self.validate_recipe(&input.recipe)?;
+        let resolved = self.prepare(&input.recipe, &input.request)?;
         let _lock = self.store.lock()?;
         let history = self.store.history()?;
         let policy = runner::fingerprint(&self.tools)?;
@@ -385,7 +484,43 @@ impl Memo {
             strategy: STRATEGY.into(),
         };
         self.store.save_record(&learned)?;
-        let receipt = self.execute(receipt, &input.recipe)?;
+        let receipt = self.execute(receipt, &resolved)?;
+        if receipt.status == Status::Succeeded {
+            self.store.index(&key, &learned.id)?;
+        }
+        Ok(receipt)
+    }
+
+    /// Explicitly verify the indexed stored request/template under the current registry.
+    /// This never changes request or context and never retries a failed history.
+    pub fn rerecord(&mut self, id: &str) -> Result<Receipt> {
+        let _lock = self.store.lock()?;
+        let source = self.store.record(id)?.context("unknown record")?;
+        let history = self.store.history()?;
+        ensure!(
+            self.verified_source(&source, &history)?,
+            "source is not a current, indexed, successfully verified record"
+        );
+        let resolved = self.prepare(&source.recipe, &source.request)?;
+        let key = request_key(&source.request)?;
+        let policy = runner::fingerprint(&self.tools)?;
+        let receipt = self.receipt(
+            &key,
+            Operation::Rerecord,
+            Status::Started,
+            policy.clone(),
+            Some(source.recipe_hash.clone()),
+            history.len(),
+        )?;
+        let learned = LearnedRecord {
+            id: receipt.id.clone(),
+            policy_hash: policy,
+            engine_version: env!("CARGO_PKG_VERSION").into(),
+            strategy: STRATEGY.into(),
+            ..source
+        };
+        self.store.save_record(&learned)?;
+        let receipt = self.execute(receipt, &resolved)?;
         if receipt.status == Status::Succeeded {
             self.store.index(&key, &learned.id)?;
         }
@@ -426,7 +561,7 @@ impl Memo {
             score >= REVIEW_THRESHOLD,
             "candidate similarity {score:.3} is below {REVIEW_THRESHOLD:.2}"
         );
-        self.validate_recipe(&candidate.recipe)?;
+        let resolved = self.prepare(&candidate.recipe, &input.request)?;
         let recipe_hash = digest(&candidate.recipe)?;
         let receipt = self.receipt(
             &key,
@@ -448,7 +583,7 @@ impl Memo {
             strategy: STRATEGY.into(),
         };
         self.store.save_record(&learned)?;
-        let receipt = self.execute(receipt, &learned.recipe)?;
+        let receipt = self.execute(receipt, &resolved)?;
         if receipt.status == Status::Succeeded {
             self.store.index(&key, &learned.id)?;
         }
@@ -487,7 +622,18 @@ impl Memo {
             !record.recipe.undo.is_empty(),
             "recipe declares no undo steps"
         );
-        self.validate_undo(&record.recipe)?;
+        // Only undo runs here: retired forward/check tools must not block recovery.
+        let undo = Recipe {
+            bind_inputs: record.recipe.bind_inputs,
+            undo: record.recipe.undo.clone(),
+            ..Recipe::default()
+        };
+        ensure!(
+            undo.undo.len() <= MAX_RECIPE_CALLS,
+            "undo exceeds {MAX_RECIPE_CALLS} calls"
+        );
+        let resolved = crate::bindings::resolve(&undo, &record.request)?;
+        self.validate_calls(&resolved.undo, ToolKind::Undo)?;
         let key = request_key(&record.request)?;
         let history = self.store.history()?;
         let policy = runner::fingerprint(&self.tools)?;
@@ -502,7 +648,7 @@ impl Memo {
         self.store.append(&receipt)?;
         let start = Instant::now();
         let mut receipt = receipt;
-        for call in record.recipe.undo.iter().rev() {
+        for call in resolved.undo.iter().rev() {
             if let Err(error) = self.verify_policy(&receipt.policy_hash) {
                 receipt.reason = Some(format!("{error:#}"));
                 break;
@@ -555,10 +701,14 @@ impl Memo {
                     stats.executions += 1;
                 }
                 (Operation::Lookup, Status::Miss) => stats.misses += 1,
+                (Operation::Lookup, Status::Stale) => stats.stale += 1,
                 (Operation::Lookup, Status::Blocked) => stats.blocked += 1,
                 (Operation::Lookup, Status::Review) => stats.reviews += 1,
                 (Operation::Reject, Status::Rejected) => stats.rejected += 1,
-                (Operation::Record | Operation::Approve, Status::Succeeded) => {
+                (
+                    Operation::Record | Operation::Approve | Operation::Rerecord,
+                    Status::Succeeded,
+                ) => {
                     stats.verified_records += 1;
                     stats.executions += 1;
                 }
@@ -598,8 +748,14 @@ impl Memo {
             || record.policy_hash != policy
             || record.engine_version != env!("CARGO_PKG_VERSION")
             || record.strategy != STRATEGY
-            || digest(&record.recipe)? != record.recipe_hash
         {
+            return Ok(false);
+        }
+        self.verified_source(record, history)
+    }
+
+    fn verified_source(&self, record: &LearnedRecord, history: &[Receipt]) -> Result<bool> {
+        if record.schema != 1 || digest(&record.recipe)? != record.recipe_hash {
             return Ok(false);
         }
         let key = request_key(&record.request)?;
@@ -616,15 +772,22 @@ impl Memo {
         Ok(latest.is_some_and(|r| {
             r.status == Status::Succeeded
                 && r.operation != Operation::Undo
-                && (!matches!(r.operation, Operation::Record | Operation::Approve)
-                    || r.id == record.id)
+                && (!matches!(
+                    r.operation,
+                    Operation::Record | Operation::Approve | Operation::Rerecord
+                ) || r.id == record.id)
         }) && history.iter().any(|r| {
             r.id == record.id
                 && r.key == key
-                && matches!(r.operation, Operation::Record | Operation::Approve)
+                && matches!(
+                    r.operation,
+                    Operation::Record | Operation::Approve | Operation::Rerecord
+                )
                 && r.status == Status::Succeeded
                 && r.recipe_hash.as_deref() == Some(record.recipe_hash.as_str())
                 && r.policy_hash == record.policy_hash
+                && r.engine_version == record.engine_version
+                && r.strategy == record.strategy
         }))
     }
 
@@ -679,8 +842,8 @@ impl Memo {
                 + recipe.checks.len()
                 + recipe.preconditions.len()
                 + recipe.undo.len()
-                <= 32,
-            "recipe exceeds 32 calls"
+                <= MAX_RECIPE_CALLS,
+            "recipe exceeds {MAX_RECIPE_CALLS} calls"
         );
         for (calls, kind) in [
             (&recipe.steps, ToolKind::Action),
@@ -688,42 +851,34 @@ impl Memo {
             (&recipe.preconditions, ToolKind::Check),
             (&recipe.undo, ToolKind::Undo),
         ] {
-            for call in calls {
-                let spec = self
-                    .tools
-                    .get(&call.tool)
-                    .with_context(|| format!("unknown tool: {}", call.tool))?;
-                ensure!(
-                    spec.kind == kind,
-                    "tool {} is not registered as {kind:?}",
-                    call.tool
-                );
-                ensure!(
-                    serde_json::to_vec(&call.input)?.len() <= runner::MAX_TOOL_BYTES,
-                    "tool input exceeds 64 KiB"
-                );
-            }
+            self.validate_calls(calls, kind)?;
         }
         Ok(())
     }
 
-    fn validate_undo(&self, recipe: &Recipe) -> Result<()> {
-        for call in &recipe.undo {
+    fn validate_calls(&self, calls: &[ToolCall], kind: ToolKind) -> Result<()> {
+        for call in calls {
             let spec = self
                 .tools
                 .get(&call.tool)
-                .with_context(|| format!("unknown undo tool: {}", call.tool))?;
+                .with_context(|| format!("unknown tool: {}", call.tool))?;
             ensure!(
-                spec.kind == ToolKind::Undo,
-                "tool {} is not registered as Undo",
+                spec.allows(kind),
+                "tool {} is not registered as {kind:?}",
                 call.tool
             );
             ensure!(
                 serde_json::to_vec(&call.input)?.len() <= runner::MAX_TOOL_BYTES,
-                "undo input exceeds 64 KiB"
+                "tool input exceeds 64 KiB"
             );
         }
         Ok(())
+    }
+
+    fn prepare(&self, recipe: &Recipe, request: &Request) -> Result<Recipe> {
+        let resolved = crate::bindings::resolve(recipe, request)?;
+        self.validate_recipe(&resolved)?;
+        Ok(resolved)
     }
 
     fn receipt(
@@ -749,6 +904,7 @@ impl Memo {
             elapsed_us: 0,
             calls: Vec::new(),
             candidates: Vec::new(),
+            stale_record: None,
             reason: None,
         })
     }

@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import http from 'node:http';
 import { ReplantClient, ReplantError } from './replant.mjs';
 
-function server() {
+function server(receipt = { status: 'miss' }, status = 200) {
   const calls = [];
   const instance = http.createServer((request, response) => {
     let body = '';
@@ -20,8 +20,8 @@ function server() {
         response.end(JSON.stringify({ status: 'failed', reason: 'unauthorized' }));
         return;
       }
-      response.writeHead(200, { 'Content-Type': 'application/json' });
-      response.end(JSON.stringify({ status: 'miss' }));
+      response.writeHead(status, { 'Content-Type': 'application/json' });
+      response.end(JSON.stringify(receipt));
     });
   });
   return new Promise((resolve) => {
@@ -82,6 +82,43 @@ test('inspect posts to the read-only endpoint', async () => {
     assert.equal(calls[0].url, '/inspect');
     assert.equal(calls[0].method, 'POST');
     assert.deepEqual(calls[0].body, request);
+  } finally {
+    instance.close();
+  }
+});
+
+test('rerecord explicitly posts only the selected record id', async () => {
+  const { instance, calls, url } = await server({ status: 'succeeded', operation: 'rerecord' });
+  try {
+    const receipt = await new ReplantClient(url, 'secret').rerecord('d'.repeat(64));
+    assert.equal(receipt.operation, 'rerecord');
+    assert.deepEqual(calls, [{ method: 'POST', url: '/rerecord', auth: 'Bearer secret', body: { id: 'd'.repeat(64) } }]);
+  } finally {
+    instance.close();
+  }
+});
+
+test('stale responses retain the template and never automatically re-record', async () => {
+  const expected = { status: 'stale', stale_record: { id: 'd'.repeat(64), recipe: { steps: [] } } };
+  const { instance, calls, url } = await server(expected);
+  try {
+    assert.deepEqual(await new ReplantClient(url, 'secret').run({ prompt: 'p' }), expected);
+    assert.deepEqual(calls.map((call) => call.url), ['/run']);
+  } finally {
+    instance.close();
+  }
+});
+
+test('failed tool stdout, stderr and exit code survive the HTTP error', async () => {
+  const expected = { status: 'failed', calls: [{ exit_code: 1, output: { ok: false }, stdout: 'seed failed', stderr: 'tail' }] };
+  const { instance, calls, url } = await server(expected, 422);
+  try {
+    await assert.rejects(new ReplantClient(url, 'secret').record({}), (error) => {
+      assert.equal(error.status, 422);
+      assert.deepEqual(error.receipt, expected);
+      return true;
+    });
+    assert.equal(calls.length, 1);
   } finally {
     instance.close();
   }

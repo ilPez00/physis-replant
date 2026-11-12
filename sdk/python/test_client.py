@@ -2,6 +2,8 @@ import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
+import urllib.request
 
 from replant_client import ReplantClient, ReplantError
 
@@ -9,6 +11,7 @@ from replant_client import ReplantClient, ReplantError
 class Handler(BaseHTTPRequestHandler):
     calls = []
     response = {}
+    response_code = 200
 
     def log_message(self, *args):
         pass
@@ -33,7 +36,7 @@ class Handler(BaseHTTPRequestHandler):
             self.response = {"status": "failed", "reason": "unauthorized"}
             self._reply(401)
         else:
-            self._reply()
+            self._reply(self.response_code)
 
 
 class ClientTests(unittest.TestCase):
@@ -51,6 +54,7 @@ class ClientTests(unittest.TestCase):
     def setUp(self):
         Handler.calls.clear()
         Handler.response = {"status": "miss"}
+        Handler.response_code = 200
 
     def test_run_posts_the_request_and_auth_header(self):
         client = ReplantClient(self.url, "secret")
@@ -84,6 +88,32 @@ class ClientTests(unittest.TestCase):
             client.run({"prompt": "p", "input": {}, "context": {}})
         self.assertEqual(caught.exception.status, 401)
         self.assertEqual(caught.exception.receipt["status"], "failed")
+
+    def test_rerecord_is_an_explicit_post_of_only_the_record_id(self):
+        Handler.response = {"status": "succeeded", "operation": "rerecord"}
+        receipt = ReplantClient(self.url, "secret").rerecord("d" * 64)
+        self.assertEqual(receipt, Handler.response)
+        self.assertEqual(Handler.calls, [("POST", "/rerecord", "Bearer secret", {"id": "d" * 64})])
+
+    def test_stale_is_returned_without_automatically_recording_or_retrying(self):
+        Handler.response = {"status": "stale", "stale_record": {"id": "d" * 64, "recipe": {"steps": []}}}
+        receipt = ReplantClient(self.url, "secret").run({"prompt": "p"})
+        self.assertEqual(receipt, Handler.response)
+        self.assertEqual([call[1] for call in Handler.calls], ["/run"])
+
+    def test_failed_process_evidence_is_preserved_in_the_error_receipt(self):
+        Handler.response_code = 422
+        Handler.response = {"status": "failed", "calls": [{"exit_code": 1, "output": {"ok": False, "error": "seed failed"}, "stdout": "seed failure", "stderr": "diagnostic tail"}]}
+        with self.assertRaises(ReplantError) as caught:
+            ReplantClient(self.url, "secret").record({"request": {"prompt": "p"}})
+        self.assertEqual(caught.exception.status, 422)
+        self.assertEqual(caught.exception.receipt, Handler.response)
+        self.assertEqual(len(Handler.calls), 1)
+
+    def test_operator_selected_long_timeout_reaches_the_http_transport(self):
+        with patch("replant_client.urllib.request.urlopen", wraps=urllib.request.urlopen) as transport:
+            ReplantClient(self.url, "secret", timeout=1860.0).run({"prompt": "p"})
+        self.assertEqual(transport.call_args.kwargs["timeout"], 1860.0)
 
 
 if __name__ == "__main__":

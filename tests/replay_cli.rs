@@ -174,7 +174,7 @@ fn changed_input_context_or_tool_implementation_never_reuses_recipe() {
         assert_eq!(f.call("run", &changed).1["status"], "miss");
     }
     fs::write(f.dir.path().join("tools.py"), "raise SystemExit('changed')").unwrap();
-    assert_eq!(f.call("run", &f.request).1["status"], "miss");
+    assert_eq!(f.call("run", &f.request).1["status"], "stale");
     assert_eq!(f.count(), 1);
 }
 
@@ -285,7 +285,7 @@ fn registry_change_invalidates_reuse_and_wrong_task_never_borrows_promotion() {
         serde_json::to_vec(&tools).unwrap(),
     )
     .unwrap();
-    assert_eq!(f.call("run", &f.request).1["status"], "miss");
+    assert_eq!(f.call("run", &f.request).1["status"], "stale");
     assert_eq!(f.count(), 1);
 }
 
@@ -332,7 +332,7 @@ fn swapping_declared_symlink_targets_invalidates_the_binding() {
     symlink(&a, &unused).unwrap();
     let (_, run) = f.call("run", &f.request);
     assert_eq!(
-        run["status"], "miss",
+        run["status"], "stale",
         "content hash dedup must not erase declared-path bindings"
     );
     assert_eq!(f.count(), 1);

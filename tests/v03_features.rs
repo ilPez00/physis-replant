@@ -96,6 +96,62 @@ fn record(context: &str, prompt: &str, undo: bool) -> Value {
 }
 
 #[test]
+fn explicit_undo_does_not_require_removed_action_or_check_tools() {
+    let f = Fixture::new();
+    let (out, learned) = f.call(
+        "record",
+        &record("undo-retired-tools", "increment once", true),
+    );
+    assert!(out.status.success(), "{learned}");
+    assert_eq!(f.counter(), 1);
+    let tools_path = f.dir.path().join("tools.json");
+    let mut tools: Value = serde_json::from_slice(&fs::read(&tools_path).unwrap()).unwrap();
+    tools.as_object_mut().unwrap().remove("increment");
+    tools.as_object_mut().unwrap().remove("verify");
+    fs::write(&tools_path, serde_json::to_vec(&tools).unwrap()).unwrap();
+    let (out, undone) = f.call("undo", &json!({"id":learned["id"]}));
+    assert!(
+        out.status.success(),
+        "undo only needs its currently authorized tools: {undone}"
+    );
+    assert_eq!(f.counter(), 0);
+    assert_eq!(undone["calls"].as_array().unwrap().len(), 1);
+    assert_eq!(undone["calls"][0]["kind"], "undo");
+}
+
+#[test]
+fn explicit_undo_preflights_every_undo_permission_before_recovery_effects() {
+    let f = Fixture::new();
+    let tools_path = f.dir.path().join("tools.json");
+    let mut tools: Value = serde_json::from_slice(&fs::read(&tools_path).unwrap()).unwrap();
+    tools["second_undo"] = tools["decrement"].clone();
+    fs::write(&tools_path, serde_json::to_vec(&tools).unwrap()).unwrap();
+    let mut input = record("undo-revoked-role", "increment once", true);
+    input["recipe"]["undo"] = json!([
+        {"tool":"decrement","input":{}},
+        {"tool":"second_undo","input":{}}
+    ]);
+    let (out, learned) = f.call("record", &input);
+    assert!(out.status.success(), "{learned}");
+    assert_eq!(f.counter(), 1);
+    tools["decrement"]["kind"] = json!("action");
+    tools.as_object_mut().unwrap().remove("increment");
+    tools.as_object_mut().unwrap().remove("verify");
+    fs::write(&tools_path, serde_json::to_vec(&tools).unwrap()).unwrap();
+    let (out, refused) = f.call("undo", &json!({"id":learned["id"]}));
+    assert!(!out.status.success());
+    assert!(refused["reason"]
+        .as_str()
+        .unwrap()
+        .contains("not registered as Undo"));
+    assert_eq!(
+        f.counter(),
+        1,
+        "the authorized reverse-first undo must not run before later authorization is checked"
+    );
+}
+
+#[test]
 fn near_match_is_reviewed_and_only_explicit_approval_executes() {
     let f = Fixture::new();
     let (out, learned) = f.call("record", &record("review-v1", "increment once", false));
@@ -191,7 +247,7 @@ fn mcp_stdio_lists_tools_and_routes_a_run() {
     let init = exchange(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
     assert_eq!(init["result"]["serverInfo"]["name"], "physis-replant");
     let list = exchange(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
-    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 8);
     let call = exchange(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
         "params":{"name":"replant_run","arguments":{"request":request("mcp-v1","increment once")}}}));
     let text = call["result"]["content"][0]["text"].as_str().unwrap();
