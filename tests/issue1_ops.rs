@@ -37,12 +37,24 @@ impl Fixture {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(&serde_json::to_vec(input).unwrap())
-            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        // stats/history read no stdin and exit immediately; feeding them races
+        // an already-closed pipe (EPIPE) on a loaded runner.
+        if matches!(
+            verb,
+            "run" | "show" | "record" | "approve" | "reject" | "undo" | "rerecord"
+        ) {
+            if let Err(error) = stdin.write_all(&serde_json::to_vec(input).unwrap()) {
+                // A child that exited before reading is still reported below
+                // through its own stdout/stderr, not as a harness panic.
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe,
+                    "stdin write failed: {error}"
+                );
+            }
+        }
+        drop(stdin);
         let out = child.wait_with_output().unwrap();
         let value = serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)));
@@ -661,5 +673,33 @@ fn diagnostics_malformed_nonobject_false_and_signal_never_succeed() {
         let (_, r) = f.call("record", &f.record());
         assert_eq!(r["status"], "failed", "{action}: {r}");
         assert!(r["calls"][0]["error"].is_string());
+    }
+}
+
+#[test]
+fn stats_and_history_do_not_read_or_require_stdin() {
+    // Regression: feeding a closed-stdin verb races EPIPE on a loaded runner.
+    let f = Fixture::new("print('{\"ok\":true}')");
+    let (_, recorded) = f.call("record", &f.record());
+    assert_eq!(recorded["status"], "succeeded");
+    for verb in ["stats", "history"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_replant"))
+            .args([verb, "--store"])
+            .arg(f.dir.path().join("state"))
+            .arg("--tools")
+            .arg(f.dir.path().join("tools.json"))
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{verb}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        match verb {
+            "stats" => assert!(value.is_object(), "{verb}: {value}"),
+            _ => assert!(value.is_array(), "{verb}: {value}"),
+        }
     }
 }
