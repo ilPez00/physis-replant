@@ -102,6 +102,7 @@ pub(crate) fn fingerprint(tools: &ToolRegistry) -> Result<String> {
 struct Capture {
     bytes: Vec<u8>,
     truncated: bool,
+    total: usize,
     error: Option<std::io::Error>,
 }
 
@@ -131,7 +132,8 @@ fn capture(mut stream: impl Read, deadline: Instant, limit: usize, tail: bool) -
         if count == 0 {
             return kept;
         }
-        kept.truncated |= kept.bytes.len() + count > limit;
+        kept.total = kept.total.saturating_add(count);
+        kept.truncated |= kept.total > limit;
         if tail {
             kept.bytes.extend_from_slice(&buffer[..count]);
             if kept.bytes.len() > limit {
@@ -246,10 +248,12 @@ fn invoke(spec: &ToolSpec, input: &Value, outcome: &mut ToolOutcome) -> Result<(
         .join()
         .map_err(|_| anyhow::anyhow!("tool stderr thread failed"))?;
     outcome.exit_code = wait.as_ref().ok().and_then(|status| status.code());
-    outcome.stdout = bounded_text(&stdout.bytes, MAX_TOOL_BYTES);
-    outcome.stderr = bounded_text(&stderr.bytes, 8192);
-    outcome.stdout_truncated = stdout.truncated;
-    outcome.stderr_truncated = stderr.truncated;
+    outcome.stdout = bounded_text(&stdout.bytes, MAX_TOOL_BYTES, false);
+    outcome.stderr = bounded_text(&stderr.bytes, 8192, true);
+    outcome.stdout_truncated =
+        stdout.truncated || String::from_utf8_lossy(&stdout.bytes).len() > MAX_TOOL_BYTES;
+    outcome.stderr_truncated =
+        stderr.truncated || String::from_utf8_lossy(&stderr.bytes).len() > 8192;
     let parsed = serde_json::from_slice::<Value>(&stdout.bytes);
     outcome.output = parsed.as_ref().ok().cloned();
     let status = wait?;
@@ -261,8 +265,10 @@ fn invoke(spec: &ToolSpec, input: &Value, outcome: &mut ToolOutcome) -> Result<(
         return Err(error.into());
     }
     ensure!(
-        !stdout.truncated && !stderr.truncated,
-        "tool output exceeds capture bounds"
+        !outcome.stdout_truncated
+            && stdout.total <= MAX_TOOL_BYTES
+            && stderr.total <= MAX_TOOL_BYTES,
+        "tool output exceeds 64 KiB per stream"
     );
     ensure!(status.success(), "tool exited unsuccessfully: {status}");
     let value = parsed.context("tool stdout is not one JSON object")?;
@@ -273,13 +279,21 @@ fn invoke(spec: &ToolSpec, input: &Value, outcome: &mut ToolOutcome) -> Result<(
     Ok(())
 }
 
-fn bounded_text(bytes: &[u8], limit: usize) -> String {
+fn bounded_text(bytes: &[u8], limit: usize, tail: bool) -> String {
     let mut text = String::from_utf8_lossy(bytes).into_owned();
-    let mut end = text.len().min(limit);
-    while !text.is_char_boundary(end) {
-        end -= 1;
+    if tail {
+        let mut start = text.len().saturating_sub(limit);
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        text.drain(..start);
+    } else {
+        let mut end = text.len().min(limit);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
     }
-    text.truncate(end);
     text
 }
 

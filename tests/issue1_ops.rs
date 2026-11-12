@@ -538,6 +538,56 @@ fn bindings_selected_data_is_not_reinterpreted_and_all_phases_bind() {
 }
 
 #[test]
+fn diagnostics_stderr_tail_truncation_is_not_protocol_overflow() {
+    let f = Fixture::new("print('{\"ok\":true}');sys.stderr.write('a'*9000+'TAIL')");
+    let (out, r) = f.call("record", &f.record());
+    assert!(out.status.success(), "{r}");
+    assert_eq!(r["calls"][0]["stderr_truncated"], true);
+    assert_eq!(r["calls"][0]["stderr"].as_str().unwrap().len(), 8192);
+    assert!(r["calls"][0]["stderr"].as_str().unwrap().ends_with("TAIL"));
+    let f = Fixture::new("print('{\"ok\":true}');sys.stderr.buffer.write(b'\\xff'*8190+b'TAIL')");
+    let (out, r) = f.call("record", &f.record());
+    assert!(out.status.success(), "{r}");
+    assert!(r["calls"][0]["stderr"].as_str().unwrap().ends_with("TAIL"));
+    assert!(r["calls"][0]["stderr"].as_str().unwrap().len() <= 8192);
+    let f = Fixture::new("print('{\"ok\":true}');sys.stderr.write('x'*65537)");
+    assert_eq!(f.call("record", &f.record()).1["status"], "failed");
+}
+
+#[test]
+fn diagnostics_maximum_declared_call_receipt_roundtrips_journal() {
+    let f = Fixture::new(
+        r#"print(json.dumps({'ok':True,'data':'\\'*32000}));sys.stderr.buffer.write(b'\0'*65536)"#,
+    );
+    let mut tools = f.tools();
+    tools["check"]["args"] = json!([f.dir.path().join("tools.py")]);
+    f.set_tools(&tools);
+    let mut r = f.record();
+    r["recipe"]["steps"] = Value::Array((0..31).map(|_| json!({"tool":"act"})).collect());
+    let (out, learned) = f.call("record", &r);
+    assert!(out.status.success(), "{}", learned["reason"]);
+    assert_eq!(learned["calls"].as_array().unwrap().len(), 32);
+    let (out, history) = f.call("history", &json!({}));
+    assert!(out.status.success(), "{history}");
+    assert_eq!(history.as_array().unwrap().len(), 2);
+    assert_eq!(history[1]["calls"].as_array().unwrap().len(), 32);
+    let (out, stats) = f.call("stats", &json!({}));
+    assert!(out.status.success(), "{stats}");
+    assert_eq!(stats["verified_records"], 1);
+    assert!(
+        fs::metadata(f.dir.path().join("state/journal.jsonl"))
+            .unwrap()
+            .len()
+            < 16 << 20
+    );
+    r["recipe"]["steps"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"tool":"act"}));
+    assert!(!f.call("record", &r).0.status.success());
+}
+
+#[test]
 fn operator_timeout_boundaries_and_default() {
     for timeout in [120001, 1800000, 0, 1800001] {
         let f = Fixture::new("print('{\"ok\":true}')");
