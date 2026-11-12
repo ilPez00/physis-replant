@@ -67,6 +67,27 @@ impl Fixture {
 }
 
 #[test]
+fn operator_timeout_boundaries_and_default() {
+    for timeout in [120001, 1800000, 0, 1800001] {
+        let f = Fixture::new("print('{\"ok\":true}')");
+        let mut tools = f.tools();
+        tools["act"]["timeout_ms"] = json!(timeout);
+        f.set_tools(&tools);
+        let (out, r) = f.call("record", &f.record());
+        assert_eq!(
+            out.status.success(),
+            (1..=1800000).contains(&timeout),
+            "{timeout}: {r}"
+        );
+    }
+    let f = Fixture::new("print('{\"ok\":true}')");
+    let mut tools = f.tools();
+    tools["act"].as_object_mut().unwrap().remove("timeout_ms");
+    let registry: physis_replant::ToolRegistry = serde_json::from_value(tools).unwrap();
+    assert_eq!(registry["act"].timeout_ms, 30000);
+}
+
+#[test]
 fn diagnostics_preserve_nonzero_json_and_stderr() {
     let f = Fixture::new("print(json.dumps({'ok':False,'detail':'denied'}));sys.stderr.write('diagnostic');sys.exit(7)");
     let (out, r) = f.call("record", &f.record());

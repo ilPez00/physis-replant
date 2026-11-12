@@ -35,8 +35,8 @@ pub(crate) fn validate_registry(tools: &ToolRegistry) -> Result<()> {
             "tool argv exceeds bounds"
         );
         ensure!(
-            (1..=120_000).contains(&spec.timeout_ms),
-            "timeout_ms must be in 1..=120000"
+            (1..=1_800_000).contains(&spec.timeout_ms),
+            "timeout_ms must be in 1..=1800000"
         );
         ensure!(
             spec.fingerprint_files.len() <= 16
