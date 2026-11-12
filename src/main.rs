@@ -151,9 +151,9 @@ fn read_token(path: Option<&PathBuf>) -> Result<String> {
     Ok(token)
 }
 
-fn execute(args: Vec<OsString>) -> Result<(Value, bool)> {
+fn execute(args: Vec<OsString>) -> Result<(Option<Value>, bool)> {
     if args.len() == 1 && matches!(args[0].to_str(), Some("--help" | "-h")) {
-        return Ok((json!({"usage": HELP}), true));
+        return Ok((Some(json!({"usage": HELP})), true));
     }
     let options = options(args)?;
     // Validate stdin before opening or changing persistent state.
@@ -197,7 +197,8 @@ fn execute(args: Vec<OsString>) -> Result<(Value, bool)> {
     };
     if options.command == "mcp" {
         mcp::serve(&options.store, tools)?;
-        return Ok((json!({"status":"stopped"}), true));
+        // The MCP transport owns stdout, including shutdown at EOF.
+        return Ok((None, true));
     }
     let mut memo = Memo::open(&options.store, tools)?;
     if options.command == "serve" {
@@ -208,7 +209,7 @@ fn execute(args: Vec<OsString>) -> Result<(Value, bool)> {
         let bind = bind.parse().context("--bind must be IP:PORT")?;
         let token = read_token(options.token_file.as_ref())?;
         serve(ServerConfig { bind, token }, memo)?;
-        return Ok((json!({"status":"stopped"}), true));
+        return Ok((Some(json!({"status":"stopped"})), true));
     }
     let receipt = match options.command.as_str() {
         "run" => memo.run(request.as_ref().context("missing request")?)?,
@@ -219,32 +220,42 @@ fn execute(args: Vec<OsString>) -> Result<(Value, bool)> {
         "undo" => memo.undo(&undo.context("missing undo input")?.id)?,
         "show" => {
             return Ok((
-                serde_json::to_value(memo.inspect(request.as_ref().context("missing request")?)?)?,
+                Some(serde_json::to_value(
+                    memo.inspect(request.as_ref().context("missing request")?)?,
+                )?),
                 true,
             ));
         }
-        "history" => return Ok((serde_json::to_value(memo.history()?)?, true)),
-        "stats" => return Ok((serde_json::to_value(memo.stats()?)?, true)),
+        "history" => return Ok((Some(serde_json::to_value(memo.history()?)?), true)),
+        "stats" => return Ok((Some(serde_json::to_value(memo.stats()?)?), true)),
         _ => unreachable!("validated command"),
     };
     let success = matches!(
         &receipt.status,
         Status::Succeeded | Status::Miss | Status::Stale | Status::Review | Status::Rejected
     );
-    Ok((serde_json::to_value(receipt)?, success))
+    Ok((Some(serde_json::to_value(receipt)?), success))
 }
 
 fn main() -> ExitCode {
-    let (value, success) = match execute(std::env::args_os().skip(1).collect()) {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let mcp_stdout = args.first().is_some_and(|arg| arg == "mcp");
+    let (value, success) = match execute(args) {
         Ok(result) => result,
+        Err(error) if mcp_stdout => {
+            eprintln!("{error:#}");
+            return ExitCode::FAILURE;
+        }
         Err(error) => (
-            json!({"status":"failed", "reason":format!("{error:#}")}),
+            Some(json!({"status":"failed", "reason":format!("{error:#}")})),
             false,
         ),
     };
-    let mut stdout = io::stdout().lock();
-    if serde_json::to_writer(&mut stdout, &value).is_err() || writeln!(stdout).is_err() {
-        return ExitCode::FAILURE;
+    if let Some(value) = value {
+        let mut stdout = io::stdout().lock();
+        if serde_json::to_writer(&mut stdout, &value).is_err() || writeln!(stdout).is_err() {
+            return ExitCode::FAILURE;
+        }
     }
     if success {
         ExitCode::SUCCESS

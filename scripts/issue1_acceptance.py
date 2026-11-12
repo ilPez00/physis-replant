@@ -240,8 +240,11 @@ class Acceptance:
         before = self.count()
         proc = subprocess.run([str(self.binary), "mcp", "--store", str(store), "--tools", str(self.registry)], input="\n".join(json.dumps(row) for row in messages) + "\n", text=True, capture_output=True, timeout=30)
         assert proc.returncode == 0, proc.stderr
-        responses = {row["id"]: row for row in map(json.loads, proc.stdout.splitlines()) if "id" in row}
-        # notifications/initialized produces no response
+        rows = list(map(json.loads, proc.stdout.splitlines()))
+        assert len(rows) == 5, f"unexpected MCP stdout frames: {rows!r}"
+        assert all(row.get("jsonrpc") == "2.0" and "id" in row for row in rows)
+        responses = {row["id"]: row for row in rows}
+        assert set(responses) == {1, 2, 3, 4, 5}, "duplicate or missing MCP response ids"
         assert len(responses[2]["result"]["tools"]) == 8
         for identifier, status, operation in [(3, "stale", "lookup"), (4, "succeeded", "rerecord"), (5, "succeeded", "replay")]:
             response = responses[identifier]["result"]
