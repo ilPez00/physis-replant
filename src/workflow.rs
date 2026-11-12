@@ -132,6 +132,14 @@ pub struct ToolOutcome {
     pub output: Option<Value>,
     pub error: Option<String>,
     pub elapsed_us: u128,
+    #[serde(default)]
+    pub stdout: String,
+    #[serde(default)]
+    pub stderr: String,
+    #[serde(default)]
+    pub stdout_truncated: bool,
+    #[serde(default)]
+    pub stderr_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

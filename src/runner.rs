@@ -93,15 +93,23 @@ pub(crate) fn fingerprint(tools: &ToolRegistry) -> Result<String> {
     ))
 }
 
-fn capture(mut stream: impl Read, deadline: Instant) -> std::io::Result<Vec<u8>> {
-    let mut kept = Vec::new();
+#[derive(Default)]
+struct Capture {
+    bytes: Vec<u8>,
+    truncated: bool,
+    error: Option<std::io::Error>,
+}
+
+fn capture(mut stream: impl Read, deadline: Instant, limit: usize, tail: bool) -> Capture {
+    let mut kept = Capture::default();
     let mut buffer = [0u8; 4096];
     loop {
         if Instant::now() >= deadline {
-            return Err(std::io::Error::new(
+            kept.error = Some(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "tool output deadline exceeded",
             ));
+            return kept;
         }
         let count = match stream.read(&mut buffer) {
             Ok(count) => count,
@@ -110,13 +118,24 @@ fn capture(mut stream: impl Read, deadline: Instant) -> std::io::Result<Vec<u8>>
                 continue;
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
+            Err(error) => {
+                kept.error = Some(error);
+                return kept;
+            }
         };
         if count == 0 {
-            return Ok(kept);
+            return kept;
         }
-        let room = (MAX_TOOL_BYTES + 1).saturating_sub(kept.len());
-        kept.extend_from_slice(&buffer[..count.min(room)]);
+        kept.truncated |= kept.bytes.len() + count > limit;
+        if tail {
+            kept.bytes.extend_from_slice(&buffer[..count]);
+            if kept.bytes.len() > limit {
+                kept.bytes.drain(..kept.bytes.len() - limit);
+            }
+        } else {
+            let room = limit.saturating_sub(kept.bytes.len());
+            kept.bytes.extend_from_slice(&buffer[..count.min(room)]);
+        }
     }
 }
 
@@ -160,7 +179,7 @@ fn send(mut stream: impl Write, bytes: &[u8], deadline: Instant) -> std::io::Res
 }
 
 #[cfg(unix)]
-fn invoke(spec: &ToolSpec, input: &Value) -> Result<(Option<i32>, Value)> {
+fn invoke(spec: &ToolSpec, input: &Value, outcome: &mut ToolOutcome) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let bytes = serde_json::to_vec(input)?;
     ensure!(bytes.len() <= MAX_TOOL_BYTES, "tool input exceeds 64 KiB");
@@ -189,8 +208,8 @@ fn invoke(spec: &ToolSpec, input: &Value) -> Result<(Option<i32>, Value)> {
     let start = Instant::now();
     let deadline = start + Duration::from_millis(spec.timeout_ms);
     let writer = thread::spawn(move || send(stdin, &bytes, deadline));
-    let output = thread::spawn(move || capture(stdout, deadline));
-    let errors = thread::spawn(move || capture(stderr, deadline));
+    let output = thread::spawn(move || capture(stdout, deadline, MAX_TOOL_BYTES, false));
+    let errors = thread::spawn(move || capture(stderr, deadline, 8192, true));
     let wait = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -221,26 +240,46 @@ fn invoke(spec: &ToolSpec, input: &Value) -> Result<(Option<i32>, Value)> {
     let stderr = errors
         .join()
         .map_err(|_| anyhow::anyhow!("tool stderr thread failed"))?;
+    outcome.exit_code = wait.as_ref().ok().and_then(|status| status.code());
+    outcome.stdout = bounded_text(&stdout.bytes, MAX_TOOL_BYTES);
+    outcome.stderr = bounded_text(&stderr.bytes, 8192);
+    outcome.stdout_truncated = stdout.truncated;
+    outcome.stderr_truncated = stderr.truncated;
+    let parsed = serde_json::from_slice::<Value>(&stdout.bytes);
+    outcome.output = parsed.as_ref().ok().cloned();
     let status = wait?;
     written.context("tool did not accept JSON input")?;
-    let stdout = stdout?;
-    let stderr = stderr?;
+    if let Some(error) = stdout.error {
+        return Err(error.into());
+    }
+    if let Some(error) = stderr.error {
+        return Err(error.into());
+    }
     ensure!(
-        stdout.len() <= MAX_TOOL_BYTES && stderr.len() <= MAX_TOOL_BYTES,
-        "tool output exceeds 64 KiB"
+        !stdout.truncated && !stderr.truncated,
+        "tool output exceeds capture bounds"
     );
     ensure!(status.success(), "tool exited unsuccessfully: {status}");
-    let value: Value =
-        serde_json::from_slice(&stdout).context("tool stdout is not one JSON object")?;
+    let value = parsed.context("tool stdout is not one JSON object")?;
     ensure!(
         value.is_object() && value.get("ok").and_then(Value::as_bool) == Some(true),
         "tool did not report ok:true"
     );
-    Ok((status.code(), value))
+    Ok(())
+}
+
+fn bounded_text(bytes: &[u8], limit: usize) -> String {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
 }
 
 #[cfg(not(unix))]
-fn invoke(_spec: &ToolSpec, _input: &Value) -> Result<(Option<i32>, Value)> {
+fn invoke(_spec: &ToolSpec, _input: &Value, _outcome: &mut ToolOutcome) -> Result<()> {
     anyhow::bail!("registered process execution currently requires Unix");
 }
 
@@ -255,13 +294,13 @@ pub(crate) fn execute(name: &str, spec: &ToolSpec, input: &Value, phase: &str) -
         output: None,
         error: None,
         elapsed_us: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
     };
-    match invoke(spec, input) {
-        Ok((code, value)) => {
-            outcome.ok = true;
-            outcome.exit_code = code;
-            outcome.output = Some(value);
-        }
+    match invoke(spec, input, &mut outcome) {
+        Ok(()) => outcome.ok = true,
         Err(error) => outcome.error = Some(format!("{name}: {error:#}")),
     }
     outcome.elapsed_us = start.elapsed().as_micros();
