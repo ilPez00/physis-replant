@@ -103,6 +103,7 @@ pub struct ReviewInput {
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     Record,
+    Rerecord,
     Replay,
     Lookup,
     Approve,
@@ -117,6 +118,7 @@ pub enum Status {
     Succeeded,
     Failed,
     Miss,
+    Stale,
     Blocked,
     Review,
     Rejected,
@@ -149,6 +151,18 @@ pub struct ReviewCandidate {
     pub request: Request,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaleRecord {
+    pub id: String,
+    pub recipe: Recipe,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RerecordInput {
+    pub id: String,
+}
+
 /// One append-only memorizer decision; Started and terminal rows share an id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Receipt {
@@ -165,6 +179,8 @@ pub struct Receipt {
     pub calls: Vec<ToolOutcome>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<ReviewCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_record: Option<StaleRecord>,
     pub reason: Option<String>,
 }
 
@@ -194,6 +210,8 @@ pub struct Stats {
     pub verified_replays: u64,
     pub failures: u64,
     pub misses: u64,
+    #[serde(default)]
+    pub stale: u64,
     pub reviews: u64,
     pub rejected: u64,
     pub undos: u64,
@@ -291,26 +309,24 @@ impl Memo {
             );
             ensure!(entry.schema == 1, "unsupported record schema");
             if last_execution.is_some_and(|r| {
-                matches!(r.operation, Operation::Record | Operation::Approve) && r.id != entry.id
+                matches!(
+                    r.operation,
+                    Operation::Record | Operation::Approve | Operation::Rerecord
+                ) && r.id != entry.id
             }) {
                 bail!(
                     "latest verified record was not indexed; inspect state before recording again"
                 );
             }
+            ensure!(
+                self.verified_source(entry, &history)?,
+                "record lacks a current index and successful original verification receipt"
+            );
             if entry.policy_hash != policy
                 || entry.engine_version != env!("CARGO_PKG_VERSION")
                 || entry.strategy != STRATEGY
             {
                 Some("tool implementation, registry or engine changed")
-            } else if !history.iter().any(|r| {
-                r.id == entry.id
-                    && r.key == key
-                    && matches!(r.operation, Operation::Record | Operation::Approve)
-                    && r.status == Status::Succeeded
-                    && r.recipe_hash.as_deref() == Some(entry.recipe_hash.as_str())
-                    && r.policy_hash == entry.policy_hash
-            }) {
-                bail!("record lacks its successful verification receipt");
             } else {
                 None
             }
@@ -323,7 +339,9 @@ impl Memo {
             } else {
                 Vec::new()
             };
-            let (status, reason) = if candidates.is_empty() {
+            let (status, reason) = if entry.is_some() {
+                (Status::Stale, reason)
+            } else if candidates.is_empty() {
                 (Status::Miss, reason)
             } else {
                 (
@@ -336,6 +354,10 @@ impl Memo {
             let receipt = Receipt {
                 reason: Some(reason.into()),
                 candidates,
+                stale_record: entry.as_ref().map(|entry| StaleRecord {
+                    id: entry.id.clone(),
+                    recipe: entry.recipe.clone(),
+                }),
                 ..receipt
             };
             self.store.append(&receipt)?;
@@ -394,6 +416,42 @@ impl Memo {
         };
         self.store.save_record(&learned)?;
         let receipt = self.execute(receipt, &input.recipe)?;
+        if receipt.status == Status::Succeeded {
+            self.store.index(&key, &learned.id)?;
+        }
+        Ok(receipt)
+    }
+
+    /// Explicitly verify the indexed stored request/template under the current registry.
+    /// This never changes request or context and never retries a failed history.
+    pub fn rerecord(&mut self, id: &str) -> Result<Receipt> {
+        let _lock = self.store.lock()?;
+        let source = self.store.record(id)?.context("unknown record")?;
+        let history = self.store.history()?;
+        ensure!(
+            self.verified_source(&source, &history)?,
+            "source is not a current, indexed, successfully verified record"
+        );
+        self.validate_recipe(&source.recipe)?;
+        let key = request_key(&source.request)?;
+        let policy = runner::fingerprint(&self.tools)?;
+        let receipt = self.receipt(
+            &key,
+            Operation::Rerecord,
+            Status::Started,
+            policy.clone(),
+            Some(source.recipe_hash.clone()),
+            history.len(),
+        )?;
+        let learned = LearnedRecord {
+            id: receipt.id.clone(),
+            policy_hash: policy,
+            engine_version: env!("CARGO_PKG_VERSION").into(),
+            strategy: STRATEGY.into(),
+            ..source
+        };
+        self.store.save_record(&learned)?;
+        let receipt = self.execute(receipt, &learned.recipe)?;
         if receipt.status == Status::Succeeded {
             self.store.index(&key, &learned.id)?;
         }
@@ -563,10 +621,14 @@ impl Memo {
                     stats.executions += 1;
                 }
                 (Operation::Lookup, Status::Miss) => stats.misses += 1,
+                (Operation::Lookup, Status::Stale) => stats.stale += 1,
                 (Operation::Lookup, Status::Blocked) => stats.blocked += 1,
                 (Operation::Lookup, Status::Review) => stats.reviews += 1,
                 (Operation::Reject, Status::Rejected) => stats.rejected += 1,
-                (Operation::Record | Operation::Approve, Status::Succeeded) => {
+                (
+                    Operation::Record | Operation::Approve | Operation::Rerecord,
+                    Status::Succeeded,
+                ) => {
                     stats.verified_records += 1;
                     stats.executions += 1;
                 }
@@ -606,8 +668,14 @@ impl Memo {
             || record.policy_hash != policy
             || record.engine_version != env!("CARGO_PKG_VERSION")
             || record.strategy != STRATEGY
-            || digest(&record.recipe)? != record.recipe_hash
         {
+            return Ok(false);
+        }
+        self.verified_source(record, history)
+    }
+
+    fn verified_source(&self, record: &LearnedRecord, history: &[Receipt]) -> Result<bool> {
+        if record.schema != 1 || digest(&record.recipe)? != record.recipe_hash {
             return Ok(false);
         }
         let key = request_key(&record.request)?;
@@ -624,15 +692,22 @@ impl Memo {
         Ok(latest.is_some_and(|r| {
             r.status == Status::Succeeded
                 && r.operation != Operation::Undo
-                && (!matches!(r.operation, Operation::Record | Operation::Approve)
-                    || r.id == record.id)
+                && (!matches!(
+                    r.operation,
+                    Operation::Record | Operation::Approve | Operation::Rerecord
+                ) || r.id == record.id)
         }) && history.iter().any(|r| {
             r.id == record.id
                 && r.key == key
-                && matches!(r.operation, Operation::Record | Operation::Approve)
+                && matches!(
+                    r.operation,
+                    Operation::Record | Operation::Approve | Operation::Rerecord
+                )
                 && r.status == Status::Succeeded
                 && r.recipe_hash.as_deref() == Some(record.recipe_hash.as_str())
                 && r.policy_hash == record.policy_hash
+                && r.engine_version == record.engine_version
+                && r.strategy == record.strategy
         }))
     }
 
@@ -757,6 +832,7 @@ impl Memo {
             elapsed_us: 0,
             calls: Vec::new(),
             candidates: Vec::new(),
+            stale_record: None,
             reason: None,
         })
     }

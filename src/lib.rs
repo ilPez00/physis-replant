@@ -22,8 +22,8 @@ pub mod workflow;
 
 pub use workflow::{
     similarity, LearnedRecord, Memo, Operation, Receipt, Recipe, RecordInput, Rejection, Request,
-    ReviewCandidate, ReviewInput, Stats, Status, ToolCall, ToolKind, ToolRegistry, ToolSpec,
-    REVIEW_THRESHOLD,
+    RerecordInput, ReviewCandidate, ReviewInput, StaleRecord, Stats, Status, ToolCall, ToolKind,
+    ToolOutcome, ToolRegistry, ToolSpec, REVIEW_THRESHOLD,
 };
 
 pub use cascade::Cascade;

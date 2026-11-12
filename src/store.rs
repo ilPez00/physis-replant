@@ -132,7 +132,7 @@ impl Store {
                         || (receipt.operation == Operation::Lookup
                             && matches!(
                                 receipt.status,
-                                Status::Miss | Status::Blocked | Status::Review
+                                Status::Miss | Status::Stale | Status::Blocked | Status::Review
                             ))
                         || (receipt.operation == Operation::Reject
                             && receipt.status == Status::Rejected),

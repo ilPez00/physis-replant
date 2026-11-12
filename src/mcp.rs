@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use crate::workflow::{Memo, RecordInput, Request, ReviewInput, ToolRegistry};
+use crate::workflow::{Memo, RecordInput, Request, RerecordInput, ReviewInput, ToolRegistry};
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -41,6 +41,7 @@ fn tool_list() -> Value {
         {"name":"replant_stats","description":"Return measured record/replay/review/undo counts.","inputSchema":schema(json!({}),vec![])},
         {"name":"replant_approve","description":"Execute a reviewed near-match candidate under this exact request and record it if checks pass.","inputSchema":review.clone()},
         {"name":"replant_reject","description":"Reject a near-match candidate for this request so it is not proposed again.","inputSchema":review},
+        {"name":"replant_rerecord","description":"Explicitly re-execute and independently check the indexed stored exact request/template under current tools.","inputSchema":schema(json!({"id":{"type":"string","description":"64-hex record id"}}),vec!["id"])},
         {"name":"replant_undo","description":"Run a learned record's declared undo steps in reverse order.","inputSchema":schema(json!({"id":{"type":"string","description":"64-hex record id"}}),vec!["id"])}
     ]})
 }
@@ -82,6 +83,11 @@ fn call(memo: &mut Memo, name: &str, arguments: &Value) -> Result<Value, String>
                 } else {
                     Ok(serde_json::to_value(memo.reject(&input)?)?)
                 }
+            }
+            "replant_rerecord" => {
+                let input: RerecordInput =
+                    serde_json::from_value(arguments.clone()).context("invalid rerecord input")?;
+                Ok(serde_json::to_value(memo.rerecord(&input.id)?)?)
             }
             "replant_undo" => {
                 let id = arguments
@@ -195,7 +201,7 @@ mod tests {
             &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
         )
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 8);
         let call = handle(&mut memo, &json!({
             "jsonrpc":"2.0","id":3,"method":"tools/call",
             "params":{"name":"replant_run","arguments":{"request":{"prompt":"never seen","input":{},"context":{}}}}

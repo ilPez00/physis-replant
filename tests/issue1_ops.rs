@@ -67,6 +67,257 @@ impl Fixture {
 }
 
 #[test]
+fn stale_lookup_and_explicit_rerecord_preserve_exact_template() {
+    let f = Fixture::new("print(json.dumps({'ok':True,'input':v}))");
+    let (_, original) = f.call("record", &f.record());
+    let script = f.dir.path().join("tools.py");
+    fs::write(
+        &script,
+        format!("{}\n# drift", fs::read_to_string(&script).unwrap()),
+    )
+    .unwrap();
+    let (out, stale) = f.call("run", &f.request());
+    assert!(out.status.success(), "{stale}");
+    assert_eq!(stale["status"], "stale");
+    assert_eq!(stale["stale_record"]["id"], original["id"]);
+    let (_, stored) = f.call("show", &f.request());
+    assert_eq!(stale["stale_record"]["recipe"], stored["recipe"]);
+    assert_eq!(stale["calls"], json!([]));
+    let (out, r) = f.call("rerecord", &json!({"id":original["id"]}));
+    assert!(out.status.success(), "{r}");
+    assert_eq!(r["operation"], "rerecord");
+    assert_eq!(r["status"], "succeeded");
+    assert_ne!(r["id"], original["id"]);
+    let (_, replay) = f.call("run", &f.request());
+    assert_eq!(replay["operation"], "replay");
+    let (_, stats) = f.call("stats", &json!({}));
+    assert_eq!(stats["stale"], 1);
+    assert_eq!(stats["verified_records"], 2);
+    assert!(!f
+        .call("rerecord", &json!({"id":original["id"]}))
+        .0
+        .status
+        .success());
+}
+
+#[test]
+fn stale_and_rerecord_refuse_unsafe_sources() {
+    for mode in [
+        "missing-index",
+        "unverified",
+        "interrupted",
+        "tampered",
+        "request",
+        "schema",
+        "engine",
+        "strategy",
+        "undone",
+        "failed-replay",
+        "new-unindexed",
+    ] {
+        let f = Fixture::new("print('{\"ok\":true}')");
+        let (_, r) = f.call("record", &f.record());
+        let id = r["id"].as_str().unwrap();
+        let state = f.dir.path().join("state");
+        let journal = state.join("journal.jsonl");
+        let stored = state.join("records").join(format!("{id}.json"));
+        match mode {
+            "missing-index" => fs::remove_file(
+                state
+                    .join("entries")
+                    .join(format!("{}.json", r["key"].as_str().unwrap())),
+            )
+            .unwrap(),
+            "unverified" => fs::write(&journal, "").unwrap(),
+            "interrupted" => {
+                let s = fs::read_to_string(&journal).unwrap();
+                fs::write(&journal, format!("{}\n", s.lines().next().unwrap())).unwrap();
+            }
+            "tampered" | "request" | "schema" | "engine" | "strategy" => {
+                let mut s: Value = serde_json::from_slice(&fs::read(&stored).unwrap()).unwrap();
+                match mode {
+                    "tampered" => s["recipe"]["steps"][0]["input"] = json!({"changed":true}),
+                    "request" => s["request"]["input"] = json!({}),
+                    "schema" => s["schema"] = json!(2),
+                    "engine" => s["engine_version"] = json!("forged"),
+                    _ => s["strategy"] = json!("forged"),
+                };
+                fs::write(stored, serde_json::to_vec(&s).unwrap()).unwrap();
+            }
+            "undone" | "failed-replay" => {
+                let mut s = r.clone();
+                s["id"] = json!("a".repeat(64));
+                s["operation"] = json!(if mode == "undone" { "undo" } else { "replay" });
+                s["status"] = json!("started");
+                let mut rows = fs::read_to_string(&journal).unwrap();
+                rows.push_str(&format!("{s}\n"));
+                s["status"] = json!(if mode == "undone" {
+                    "succeeded"
+                } else {
+                    "failed"
+                });
+                rows.push_str(&format!("{s}\n"));
+                fs::write(&journal, rows).unwrap();
+            }
+            "new-unindexed" => {
+                let (_, new) = f.call("record", &f.record());
+                assert_ne!(new["id"], r["id"]);
+                fs::write(
+                    state
+                        .join("entries")
+                        .join(format!("{}.json", r["key"].as_str().unwrap())),
+                    serde_json::to_vec(id).unwrap(),
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let script = f.dir.path().join("tools.py");
+        fs::write(
+            &script,
+            format!("{}\n# drift", fs::read_to_string(&script).unwrap()),
+        )
+        .unwrap();
+        let (_, lookup) = f.call("run", &f.request());
+        assert!(lookup.get("stale_record").is_none(), "{mode}: {lookup}");
+        let (out, re) = f.call("rerecord", &json!({"id":id}));
+        assert!(!out.status.success(), "{mode}: {re}");
+        assert!(re.get("calls").is_none(), "{mode}: {re}");
+    }
+}
+
+#[test]
+fn failed_rerecord_blocks_replay_and_does_not_replace_index() {
+    let f = Fixture::new("print('{\"ok\":true}')");
+    let (_, r) = f.call("record", &f.record());
+    fs::write(
+        f.dir.path().join("tools.py"),
+        "import json,sys\njson.load(sys.stdin)\nprint('{\"ok\":false}')",
+    )
+    .unwrap();
+    let (out, failed) = f.call("rerecord", &json!({"id":r["id"]}));
+    assert!(!out.status.success());
+    assert_eq!(failed["operation"], "rerecord");
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(f.call("show", &f.request()).1["id"], r["id"]);
+    assert_eq!(f.call("run", &f.request()).1["status"], "blocked");
+}
+
+#[test]
+fn rerecord_http_and_mcp_projections_exercise_real_processes() {
+    use std::io::{BufRead, BufReader, Read};
+    use std::net::{TcpListener, TcpStream};
+    for transport in ["http", "mcp"] {
+        let f = Fixture::new("print('{\"ok\":true}')");
+        let (_, original) = f.call("record", &f.record());
+        let script = f.dir.path().join("tools.py");
+        fs::write(
+            &script,
+            format!("{}\n# drift", fs::read_to_string(&script).unwrap()),
+        )
+        .unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_replant"));
+        cmd.args([if transport == "http" { "serve" } else { "mcp" }, "--store"])
+            .arg(f.dir.path().join("state"))
+            .arg("--tools")
+            .arg(f.dir.path().join("tools.json"));
+        let address = if transport == "http" {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let a = listener.local_addr().unwrap();
+            drop(listener);
+            cmd.args(["--bind", &a.to_string()])
+                .env("REPLANT_API_TOKEN", "issue-one-test-token");
+            Some(a)
+        } else {
+            None
+        };
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if let Some(address) = address {
+            let mut ready = false;
+            for _ in 0..200 {
+                if TcpStream::connect(address).is_ok() {
+                    ready = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(ready);
+            let http = |path: &str, body: Value, auth: bool| {
+                let body = body.to_string();
+                let mut s = TcpStream::connect(address).unwrap();
+                s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                    .unwrap();
+                let auth = if auth {
+                    "Authorization: Bearer issue-one-test-token\r\n"
+                } else {
+                    ""
+                };
+                write!(
+                    s,
+                    "POST {path} HTTP/1.1\r\nHost: test\r\n{auth}Content-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                let mut reply = String::new();
+                s.read_to_string(&mut reply).unwrap();
+                let (head, body) = reply.split_once("\r\n\r\n").unwrap();
+                (
+                    head.split_whitespace()
+                        .nth(1)
+                        .unwrap()
+                        .parse::<u16>()
+                        .unwrap(),
+                    serde_json::from_str::<Value>(body).unwrap(),
+                )
+            };
+            assert_eq!(
+                http("/rerecord", json!({"id":original["id"]}), false).0,
+                401
+            );
+            let (status, stale) = http("/run", f.request(), true);
+            assert_eq!(status, 200);
+            assert_eq!(stale["status"], "stale");
+            let (status, r) = http("/rerecord", json!({"id":original["id"]}), true);
+            assert_eq!(status, 200, "{r}");
+            assert_eq!(r["operation"], "rerecord");
+            assert_eq!(r["status"], "succeeded");
+            child.kill().unwrap();
+            child.wait().unwrap();
+        } else {
+            let mut stdin = child.stdin.take().unwrap();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap());
+            let mut call = |name: &str, args: Value| {
+                writeln!(stdin,"{}",json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}})).unwrap();
+                stdin.flush().unwrap();
+                let mut line = String::new();
+                stdout.read_line(&mut line).unwrap();
+                let reply: Value = serde_json::from_str(&line).unwrap();
+                let result = reply["result"].clone();
+                let text = result["content"][0]["text"].as_str().unwrap();
+                (
+                    result["isError"].clone(),
+                    serde_json::from_str::<Value>(text).unwrap(),
+                )
+            };
+            let (error, stale) = call("replant_run", json!({"request":f.request()}));
+            assert_eq!(error, false);
+            assert_eq!(stale["status"], "stale");
+            let (error, r) = call("replant_rerecord", json!({"id":original["id"]}));
+            assert_eq!(error, false, "{r}");
+            assert_eq!(r["operation"], "rerecord");
+            assert_eq!(r["status"], "succeeded");
+            drop(stdin);
+            child.wait().unwrap();
+        }
+    }
+}
+
+#[test]
 fn operator_timeout_boundaries_and_default() {
     for timeout in [120001, 1800000, 0, 1800001] {
         let f = Fixture::new("print('{\"ok\":true}')");

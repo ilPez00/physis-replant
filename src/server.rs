@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Value};
 
-use crate::workflow::{Memo, RecordInput, Request, ReviewInput, Status};
+use crate::workflow::{Memo, RecordInput, Request, RerecordInput, ReviewInput, Status};
 
 const MAX_HEADER: usize = 16_384;
 const MAX_BODY: usize = 1 << 20;
@@ -142,7 +142,7 @@ fn dispatch(memo: &Mutex<Memo>, token: &str, request: HttpRequest) -> (u16, Valu
     }
     if !matches!(
         request.path.as_str(),
-        "/run" | "/record" | "/inspect" | "/approve" | "/reject" | "/undo" | "/stats"
+        "/run" | "/record" | "/inspect" | "/approve" | "/reject" | "/undo" | "/rerecord" | "/stats"
     ) {
         return (404, json!({"status":"failed","reason":"unknown path"}));
     }
@@ -194,6 +194,9 @@ fn dispatch(memo: &Mutex<Memo>, token: &str, request: HttpRequest) -> (u16, Valu
         "/record" => serde_json::from_slice::<RecordInput>(&request.body)
             .map_err(anyhow::Error::from)
             .and_then(|record| memo.record(&record)),
+        "/rerecord" => serde_json::from_slice::<RerecordInput>(&request.body)
+            .map_err(anyhow::Error::from)
+            .and_then(|input| memo.rerecord(&input.id)),
         "/approve" => serde_json::from_slice::<ReviewInput>(&request.body)
             .map_err(anyhow::Error::from)
             .and_then(|review| memo.approve(&review)),
@@ -213,7 +216,11 @@ fn dispatch(memo: &Mutex<Memo>, token: &str, request: HttpRequest) -> (u16, Valu
     match receipt {
         Ok(receipt) => {
             let status = match receipt.status {
-                Status::Succeeded | Status::Miss | Status::Review | Status::Rejected => 200,
+                Status::Succeeded
+                | Status::Miss
+                | Status::Stale
+                | Status::Review
+                | Status::Rejected => 200,
                 Status::Blocked => 409,
                 _ => 422,
             };
