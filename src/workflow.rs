@@ -13,6 +13,7 @@ use crate::{runner, store::Store};
 
 pub const STRATEGY: &str = "exact-request-verified-tools-v1";
 pub const MAX_JSON_BYTES: usize = 1 << 20;
+pub(crate) const MAX_RECIPE_CALLS: usize = 32;
 /// Near-match proposals are opt-in: never auto-replayed, always reviewed.
 pub const REVIEW_THRESHOLD: f64 = 0.80;
 pub const MAX_REVIEW_CANDIDATES: usize = 3;
@@ -627,7 +628,10 @@ impl Memo {
             undo: record.recipe.undo.clone(),
             ..Recipe::default()
         };
-        ensure!(undo.undo.len() <= 32, "undo exceeds 32 calls");
+        ensure!(
+            undo.undo.len() <= MAX_RECIPE_CALLS,
+            "undo exceeds {MAX_RECIPE_CALLS} calls"
+        );
         let resolved = crate::bindings::resolve(&undo, &record.request)?;
         self.validate_calls(&resolved.undo, ToolKind::Undo)?;
         let key = request_key(&record.request)?;
@@ -838,8 +842,8 @@ impl Memo {
                 + recipe.checks.len()
                 + recipe.preconditions.len()
                 + recipe.undo.len()
-                <= 32,
-            "recipe exceeds 32 calls"
+                <= MAX_RECIPE_CALLS,
+            "recipe exceeds {MAX_RECIPE_CALLS} calls"
         );
         for (calls, kind) in [
             (&recipe.steps, ToolKind::Action),
