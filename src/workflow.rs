@@ -621,7 +621,15 @@ impl Memo {
             !record.recipe.undo.is_empty(),
             "recipe declares no undo steps"
         );
-        let resolved = self.prepare(&record.recipe, &record.request)?;
+        // Only undo runs here: retired forward/check tools must not block recovery.
+        let undo = Recipe {
+            bind_inputs: record.recipe.bind_inputs,
+            undo: record.recipe.undo.clone(),
+            ..Recipe::default()
+        };
+        ensure!(undo.undo.len() <= 32, "undo exceeds 32 calls");
+        let resolved = crate::bindings::resolve(&undo, &record.request)?;
+        self.validate_calls(&resolved.undo, ToolKind::Undo)?;
         let key = request_key(&record.request)?;
         let history = self.store.history()?;
         let policy = runner::fingerprint(&self.tools)?;
@@ -839,21 +847,26 @@ impl Memo {
             (&recipe.preconditions, ToolKind::Check),
             (&recipe.undo, ToolKind::Undo),
         ] {
-            for call in calls {
-                let spec = self
-                    .tools
-                    .get(&call.tool)
-                    .with_context(|| format!("unknown tool: {}", call.tool))?;
-                ensure!(
-                    spec.allows(kind),
-                    "tool {} is not registered as {kind:?}",
-                    call.tool
-                );
-                ensure!(
-                    serde_json::to_vec(&call.input)?.len() <= runner::MAX_TOOL_BYTES,
-                    "tool input exceeds 64 KiB"
-                );
-            }
+            self.validate_calls(calls, kind)?;
+        }
+        Ok(())
+    }
+
+    fn validate_calls(&self, calls: &[ToolCall], kind: ToolKind) -> Result<()> {
+        for call in calls {
+            let spec = self
+                .tools
+                .get(&call.tool)
+                .with_context(|| format!("unknown tool: {}", call.tool))?;
+            ensure!(
+                spec.allows(kind),
+                "tool {} is not registered as {kind:?}",
+                call.tool
+            );
+            ensure!(
+                serde_json::to_vec(&call.input)?.len() <= runner::MAX_TOOL_BYTES,
+                "tool input exceeds 64 KiB"
+            );
         }
         Ok(())
     }
