@@ -58,6 +58,11 @@ export class ReplantClient {
     return this._request('POST', '/record', record);
   }
 
+  // Explicit authorization to repeat effects; never an automatic stale fallback.
+  rerecord(id) {
+    return this._request('POST', '/rerecord', { id });
+  }
+
   inspect(request) {
     return this._request('POST', '/inspect', request);
   }

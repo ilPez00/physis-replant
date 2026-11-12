@@ -70,6 +70,13 @@ class ReplantClient:
     def record(self, record: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/record", record)
 
+    def rerecord(self, record_id: str) -> Dict[str, Any]:
+        """Explicitly re-execute an indexed recipe and its independent checks.
+
+        This repeats real effects. Never call automatically on stale or timeout.
+        """
+        return self._request("POST", "/rerecord", {"id": record_id})
+
     def inspect(self, request: Dict[str, Any]) -> Any:
         return self._request("POST", "/inspect", request)
 

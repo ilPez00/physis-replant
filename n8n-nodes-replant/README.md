@@ -29,6 +29,7 @@ The credential test calls `GET /healthz`.
 |---|---|---|
 | Run | `POST /run` | `{prompt,input,context}` |
 | Record | `POST /record` | `{request,recipe,trace}` |
+| Re-record (Repeat Effects) | `POST /rerecord` | `{id}` |
 | Inspect | `POST /inspect` | `{prompt,input,context}` |
 | Stats | `GET /stats` | — |
 | Approve Near-Match | `POST /approve` | `{request,candidate}` |
@@ -36,7 +37,16 @@ The credential test calls `GET /healthz`.
 | Undo | `POST /undo` | `{id}` |
 
 Route `status: miss` to your planner and then Record. Route `review` to a human
-or policy step; never auto-approve. `blocked`/`failed` should stop the workflow.
+or policy step; never auto-approve. Route `stale` to an operator to inspect the
+stored template/id and authorize any repeated effects. Re-record is explicit;
+never automatically connect `stale` to it. `blocked`/`failed` stop the workflow.
+
+Set **Request Timeout (Milliseconds)** above the entire authorized recipe's
+expected duration (default 30,000; accepted range 1..86,400,000). For a single
+30-minute tool plus overhead, 1,860,000 is an example; multiple long tools may
+require more. The operator-owned registry separately limits each tool to
+30 minutes. Timeout/disconnect does not prove that effects were cancelled.
+Inspect the journal and real state before retrying; retries are not automatic.
 
 Each input item produces one linked output item; payload expressions are
 evaluated per item. Inspect never executes a recipe and returns

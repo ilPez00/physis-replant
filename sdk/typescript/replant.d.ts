@@ -10,6 +10,7 @@ export interface ToolCall {
 }
 
 export interface Recipe {
+  bind_inputs?: boolean;
   preconditions?: ToolCall[];
   steps: ToolCall[];
   checks: ToolCall[];
@@ -28,19 +29,49 @@ export interface ReviewCandidate {
   request: ReplantRequest;
 }
 
+export type ToolKind = 'action' | 'check' | 'undo';
+
+export type ToolSpec = {
+  program: string;
+  args?: string[];
+  fingerprint_files?: string[];
+  timeout_ms?: number;
+} & ({ kind: ToolKind; kinds?: never } | { kind?: never; kinds: ToolKind[] });
+
+export interface ToolOutcome {
+  tool: string;
+  kind: ToolKind;
+  phase: string;
+  ok: boolean;
+  exit_code: number | null;
+  output: unknown | null;
+  error: string | null;
+  elapsed_us: number;
+  stdout?: string;
+  stderr?: string;
+  stdout_truncated?: boolean;
+  stderr_truncated?: boolean;
+}
+
+export interface StaleRecord {
+  id: string;
+  recipe: Recipe;
+}
+
 export interface Receipt {
   id: string;
   key: string;
-  operation: 'record' | 'replay' | 'lookup' | 'approve' | 'reject' | 'undo';
-  status: 'started' | 'succeeded' | 'failed' | 'miss' | 'blocked' | 'review' | 'rejected';
+  operation: 'record' | 'rerecord' | 'replay' | 'lookup' | 'approve' | 'reject' | 'undo';
+  status: 'started' | 'succeeded' | 'failed' | 'miss' | 'stale' | 'blocked' | 'review' | 'rejected';
   engine_version: string;
   strategy: string;
   policy_hash: string;
   recipe_hash?: string | null;
   provider_calls: number;
   elapsed_us: number;
-  calls: Array<Record<string, unknown>>;
+  calls: ToolOutcome[];
   candidates?: ReviewCandidate[];
+  stale_record?: StaleRecord | null;
   reason?: string | null;
 }
 
@@ -50,6 +81,7 @@ export interface Stats {
   verified_replays: number;
   failures: number;
   misses: number;
+  stale: number;
   reviews: number;
   rejected: number;
   undos: number;
@@ -69,6 +101,7 @@ export class ReplantClient {
   health(): Promise<{ status: string }>;
   run(request: ReplantRequest): Promise<Receipt>;
   record(record: ReplantRecord): Promise<Receipt>;
+  rerecord(id: string): Promise<Receipt>;
   inspect(request: ReplantRequest): Promise<unknown>;
   stats(): Promise<Stats>;
   approve(request: ReplantRequest, candidate: string): Promise<Receipt>;
