@@ -13,6 +13,14 @@ Record a verified tool recipe once. Re-run the **real actions and checks** forev
 
 ---
 
+
+> **TL;DR.** Record a verified tool recipe once; replay the real actions + checks forever,
+> no inference, no cached side effects. **Measured in a real n8n loop: 99% fewer tokens**
+> (45,200 → 452 over 100 iterations; 100 vs 1 model calls; both arms ran 100 real actions +
+> 100 independent checks). Experimental, deliberately narrow; not on crates.io/npm yet.
+> **Evidence:** CI green on `main`; `cargo test --locked` = 25 passed / 0 failed on a fresh
+> checkout (2026-11-21). Walkthrough: [docs/walkthrough-n8n-2026-11-21.md](docs/walkthrough-n8n-2026-11-21.md).
+
 ## The problem
 
 Agents are great at figuring out a task once and terrible at remembering it.
@@ -256,3 +264,14 @@ of the working tree: the portable, restorable, verifiable artifact is
 restore it.
 
 Details and the rest of the storage tiers: `~/.config/agents/SYNC.md`.
+
+
+## Verified 2026-11-21
+
+Fresh public checkout/release, run on a clean host (pansa, 12-core Linux):
+
+- `cargo test --locked` on fresh `--depth 1` checkout: **25 passed, 0 failed** (18 unit + 7 v03_features).
+- GitHub Actions CI on `main`: success (2026-11-21T11:31Z).
+- n8n measurement not re-run here (needs n8n + local model); committed report + machine-readable JSON internally consistent, limits stated.
+
+Method + full logs: portfolio audit verification log (private hub); reproduction commands in this README.
