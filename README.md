@@ -1,4 +1,4 @@
-# physis-replant
+# physis-replant — Deterministic LLM Agent Workflow Replay
 
 ### Stop paying an LLM to do the same task twice.
 
